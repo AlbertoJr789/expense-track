@@ -13,18 +13,34 @@ export default function AppTabs() {
       indicatorColor={colors.backgroundElement}
       labelStyle={{ selected: { color: colors.text } }}>
       <NativeTabs.Trigger name="index">
-        <NativeTabs.Trigger.Label>Home</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Label>Mês</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
-          src={require('@/assets/images/tabIcons/home.png')}
-          renderingMode="template"
+          sf={{ default: 'calendar', selected: 'calendar' }}
+          md="calendar_month"
         />
       </NativeTabs.Trigger>
 
-      <NativeTabs.Trigger name="explore">
-        <NativeTabs.Trigger.Label>Explore</NativeTabs.Trigger.Label>
+      <NativeTabs.Trigger name="expenses">
+        <NativeTabs.Trigger.Label>Saídas</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon
-          src={require('@/assets/images/tabIcons/explore.png')}
-          renderingMode="template"
+          sf={{ default: 'arrow.up.circle', selected: 'arrow.up.circle.fill' }}
+          md="arrow_upward"
+        />
+      </NativeTabs.Trigger>
+
+      <NativeTabs.Trigger name="incomes">
+        <NativeTabs.Trigger.Label>Entradas</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Icon
+          sf={{ default: 'arrow.down.circle', selected: 'arrow.down.circle.fill' }}
+          md="arrow_downward"
+        />
+      </NativeTabs.Trigger>
+
+      <NativeTabs.Trigger name="charts">
+        <NativeTabs.Trigger.Label>Evolução</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Icon
+          sf={{ default: 'chart.bar', selected: 'chart.bar.fill' }}
+          md="bar_chart"
         />
       </NativeTabs.Trigger>
     </NativeTabs>
