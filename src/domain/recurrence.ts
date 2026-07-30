@@ -102,6 +102,18 @@ export function lastNYearMonths(n: number, from: Date = new Date()): string[] {
   return result;
 }
 
+/** Meses inclusivos de fromYm até toYm (ambos YYYY-MM). */
+export function yearMonthsRange(fromYm: string, toYm: string): string[] {
+  if (fromYm > toYm) return [];
+  const result: string[] = [];
+  let cursor = fromYm;
+  while (cursor <= toYm) {
+    result.push(cursor);
+    cursor = addMonths(cursor, 1);
+  }
+  return result;
+}
+
 export function formatBrl(value: number): string {
   return value.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }

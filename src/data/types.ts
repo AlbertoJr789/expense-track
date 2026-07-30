@@ -19,7 +19,14 @@ export type RecurringItem = {
   createdAt: string;
 };
 
-export type Expense = RecurringItem;
+/** Parent template (yearMonth null) or monthly child debit (yearMonth set). */
+export type Expense = RecurringItem & {
+  parentId: string | null;
+  yearMonth: string | null;
+  paid: boolean;
+  paidAt: string | null;
+};
+
 export type Income = RecurringItem;
 
 export type Payment = {
@@ -44,7 +51,6 @@ export type IncomeInput = ExpenseInput;
 
 export type MonthExpenseRow = Expense & {
   groupName: string | null;
-  paid: boolean;
   isNext: boolean;
 };
 

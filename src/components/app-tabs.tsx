@@ -24,7 +24,7 @@ export default function AppTabs() {
             <CenterTab label="Mês" sublabel="Atual" />
           </TabTrigger>
           <TabTrigger name="charts" href="/charts" asChild>
-            <SideTab label="Evolução" />
+            <SideTab label="Acompanhamento" />
           </TabTrigger>
         </TabBar>
       </TabList>

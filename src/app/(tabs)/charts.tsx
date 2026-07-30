@@ -1,11 +1,13 @@
-import { ScrollView, StyleSheet, View } from 'react-native';
-import { useMemo } from 'react';
+import { ScrollView, StyleSheet, View, ActivityIndicator } from 'react-native';
+import { useCallback, useState } from 'react';
+import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useData } from '@/data/DataProvider';
+import type { MonthSeriesPoint } from '@/data/types';
 import { formatBrl } from '@/domain/recurrence';
 import { useTheme } from '@/hooks/use-theme';
 
@@ -15,20 +17,36 @@ export default function ChartsScreen() {
   const theme = useTheme();
   const insets = useSafeAreaInsets();
   const { getMonthSeries, ready } = useData();
-  const series = useMemo(() => (ready ? getMonthSeries(12) : []), [ready, getMonthSeries]);
+  const [series, setSeries] = useState<MonthSeriesPoint[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  const maxValue = Math.max(
-    1,
-    ...series.flatMap((p) => [p.expenseTotal, p.incomeTotal])
+  useFocusEffect(
+    useCallback(() => {
+      if (!ready) return;
+      setLoading(true);
+      getMonthSeries(12)
+        .then(setSeries)
+        .catch(console.error)
+        .finally(() => setLoading(false));
+    }, [ready, getMonthSeries])
   );
+
+  const maxValue = Math.max(1, ...series.flatMap((p) => [p.expenseTotal, p.incomeTotal]));
 
   const latest = series[series.length - 1];
   const previous = series[series.length - 2];
-  const expenseDelta =
-    latest && previous ? latest.expenseTotal - previous.expenseTotal : 0;
+  const expenseDelta = latest && previous ? latest.expenseTotal - previous.expenseTotal : 0;
 
   const monthlyExpense = latest?.expenseTotal ?? 0;
   const desiredReserve = monthlyExpense * 12;
+
+  if (!ready || (loading && series.length === 0)) {
+    return (
+      <ThemedView style={styles.centered}>
+        <ActivityIndicator />
+      </ThemedView>
+    );
+  }
 
   return (
     <ThemedView style={styles.container}>
@@ -42,7 +60,7 @@ export default function ChartsScreen() {
         ]}>
         <ThemedText type="subtitle">Evolução</ThemedText>
         <ThemedText themeColor="textSecondary">
-          Comparativo de despesas e receitas recorrentes (últimos 12 meses)
+          Comparativo de despesas e receitas a partir do primeiro mês com lançamentos
         </ThemedText>
 
         <View style={[styles.reserveCard, { backgroundColor: theme.backgroundElement }]}>
@@ -145,6 +163,7 @@ function LegendDot({ color, label }: { color: string; label: string }) {
 
 const styles = StyleSheet.create({
   container: { flex: 1 },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   content: {
     paddingHorizontal: Spacing.four,
     gap: Spacing.two,

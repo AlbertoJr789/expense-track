@@ -1,5 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { FlatList, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { FlatList, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useFocusEffect } from 'expo-router';
@@ -12,6 +12,7 @@ import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useData } from '@/data/DataProvider';
 import type {
+  Expense,
   ExpenseInput,
   Group,
   IncomeInput,
@@ -209,14 +210,18 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
   const insets = useSafeAreaInsets();
   const {
     groups,
+    expenses: expenseTemplates,
     getMonthDashboard,
     togglePayment,
     createExpense,
     updateExpense,
+    updateExpenseChild,
     deleteExpense,
     createIncome,
     updateIncome,
     deleteIncome,
+    getExpenseForEdit,
+    listExpenseChildrenByParent,
   } = useData();
 
   const isExpense = kind === 'expense';
@@ -225,10 +230,15 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
 
   const [month, setMonth] = useState(currentYearMonth());
   const [query, setQuery] = useState('');
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [rows, setRows] = useState<(MonthExpenseRow | MonthIncomeRow)[]>([]);
   const [modalOpen, setModalOpen] = useState(false);
-  const [editing, setEditing] = useState<RecurringItem | null>(null);
+  const [editing, setEditing] = useState<RecurringItem | Expense | null>(null);
+  const [childDebits, setChildDebits] = useState<Expense[]>([]);
+  const [childModalOpen, setChildModalOpen] = useState(false);
+  const [editingChild, setEditingChild] = useState<Expense | null>(null);
+  const [totalsCollapsed, setTotalsCollapsed] = useState(false);
 
   const load = useCallback(async () => {
     const data = await getMonthDashboard(month);
@@ -252,6 +262,7 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
 
   const openCreate = useCallback(() => {
     setEditing(null);
+    setChildDebits([]);
     setModalOpen(true);
   }, []);
 
@@ -266,11 +277,34 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
     const q = query.trim().toLowerCase();
     let list = rows;
     if (q) list = list.filter((r) => r.name.toLowerCase().includes(q));
+    if (selectedGroupIds.length > 0) {
+      const set = new Set(selectedGroupIds);
+      list = list.filter((r) => r.groupId != null && set.has(r.groupId));
+    }
     if (pending) list = list.filter((r) => r.id !== pending.id);
     return list;
-  }, [rows, query, pending]);
+  }, [rows, query, selectedGroupIds, pending]);
 
   const paged = useMemo(() => visibleRows.slice(0, visibleCount), [visibleRows, visibleCount]);
+
+  const groupTotals = useMemo(() => {
+    const map = new Map<string, { name: string; total: number }>();
+    for (const row of visibleRows) {
+      const key = row.groupId ?? '__none__';
+      const name = row.groupName ?? 'Sem grupo';
+      const current = map.get(key) ?? { name, total: 0 };
+      current.total += row.amount;
+      map.set(key, current);
+    }
+    return Array.from(map.entries())
+      .map(([id, v]) => ({ id, ...v }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+  }, [visibleRows]);
+
+  const grandTotal = useMemo(
+    () => visibleRows.reduce((acc, r) => acc + r.amount, 0),
+    [visibleRows]
+  );
 
   function changeMonth(next: string) {
     setMonth(next);
@@ -282,24 +316,92 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
     setVisibleCount(PAGE_SIZE);
   }
 
-  function openEdit(item: RecurringItem) {
-    setEditing(item);
+  function toggleGroupFilter(groupId: string) {
+    setSelectedGroupIds((prev) => {
+      if (prev.includes(groupId)) return prev.filter((id) => id !== groupId);
+      return [...prev, groupId];
+    });
+    setVisibleCount(PAGE_SIZE);
+  }
+
+  async function openEdit(item: RecurringItem) {
+    if (isExpense) {
+      const editable = await getExpenseForEdit(item.id);
+      setEditing(editable);
+      if (editable && !editable.yearMonth) {
+        const kids = await listExpenseChildrenByParent(editable.id);
+        setChildDebits(kids);
+      } else {
+        setChildDebits([]);
+      }
+    } else {
+      setEditing(item);
+      setChildDebits([]);
+    }
     setModalOpen(true);
+  }
+
+  async function refreshChildDebits(parentId: string) {
+    const kids = await listExpenseChildrenByParent(parentId);
+    setChildDebits(kids);
   }
 
   async function handleSave(input: ExpenseInput) {
     if (editing) {
-      await (isExpense ? updateExpense : updateIncome)(editing.id, input as IncomeInput);
+      if (isExpense) {
+        await updateExpense(editing.id, input, month);
+        if (!(editing as Expense).yearMonth) {
+          await refreshChildDebits(editing.id);
+        }
+      } else {
+        await updateIncome(editing.id, input as IncomeInput);
+      }
+    } else if (isExpense) {
+      await createExpense(input, month);
     } else {
-      await (isExpense ? createExpense : createIncome)(input as IncomeInput);
+      await createIncome(input as IncomeInput);
+    }
+    await load();
+  }
+
+  async function handleSaveChild(input: ExpenseInput) {
+    if (!editingChild) return;
+    await updateExpenseChild(editingChild.id, {
+      name: input.name,
+      amount: input.amount,
+      dueDay: input.dueDay,
+      groupId: input.groupId,
+    });
+    if (editing && !(editing as Expense).yearMonth) {
+      await refreshChildDebits(editing.id);
+    }
+    await load();
+  }
+
+  async function handleDeleteChild(child: Expense) {
+    await deleteExpense(child.id);
+    if (editing && !(editing as Expense).yearMonth) {
+      await refreshChildDebits(editing.id);
     }
     await load();
   }
 
   async function toggleStatus(item: MonthExpenseRow) {
-    await togglePayment(item.id, month, !item.paid);
+    await togglePayment(item.id, !item.paid);
     await load();
   }
+
+  function itemRecurrenceLabel(item: MonthExpenseRow | MonthIncomeRow) {
+    if (!isExpense) return recurrenceLabel(item.recurrence);
+    const child = item as MonthExpenseRow;
+    if (child.parentId) {
+      const parent = expenseTemplates.find((t) => t.id === child.parentId);
+      return recurrenceLabel(parent?.recurrence ?? null);
+    }
+    return recurrenceLabel(item.recurrence);
+  }
+
+  const footerBottom = insets.bottom + BottomTabInset + Spacing.two;
 
   return (
     <>
@@ -312,6 +414,53 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
             <MonthNav month={month} onChange={changeMonth} />
           </View>
         </View>
+
+        {groups.length > 0 && (
+          <View style={styles.groupFilter}>
+            <ThemedText type="small" themeColor="textSecondary">
+              Grupos
+            </ThemedText>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.groupChips}
+              decelerationRate="fast">
+              {groups.map((g) => {
+                const selected = selectedGroupIds.includes(g.id);
+                return (
+                  <Pressable
+                    key={g.id}
+                    onPress={() => toggleGroupFilter(g.id)}
+                    style={[
+                      styles.groupChip,
+                      {
+                        backgroundColor: selected
+                          ? theme.accent
+                          : theme.backgroundElement,
+                      },
+                    ]}>
+                    <ThemedText
+                      type="small"
+                      style={selected ? styles.groupChipSelectedText : undefined}
+                      themeColor={selected ? undefined : 'textSecondary'}>
+                      {g.name}
+                    </ThemedText>
+                  </Pressable>
+                );
+              })}
+              {selectedGroupIds.length > 0 && (
+                <Pressable
+                  onPress={() => setSelectedGroupIds([])}
+                  hitSlop={8}
+                  style={styles.groupChipClear}>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    Limpar
+                  </ThemedText>
+                </Pressable>
+              )}
+            </ScrollView>
+          </View>
+        )}
       </View>
 
       <FlatList
@@ -326,12 +475,12 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
         }}
         contentContainerStyle={[
           styles.list,
-          { paddingBottom: BottomTabInset + insets.bottom + Spacing.six },
+          { paddingBottom: footerBottom + 120 },
         ]}
         ListEmptyComponent={
           <ThemedText themeColor="textSecondary" style={styles.empty}>
-            {query.trim()
-              ? 'Nenhum resultado para a pesquisa.'
+            {query.trim() || selectedGroupIds.length > 0
+              ? 'Nenhum resultado para os filtros.'
               : `Nenhuma ${noun} ativa em ${yearMonthLabel(month)}.`}
           </ThemedText>
         }
@@ -339,32 +488,83 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
           const expenseRow = isExpense ? (item as MonthExpenseRow) : null;
           return (
             <SwipeRow onDelete={() => remove(item)}>
-              <Pressable
-                onPress={() => openEdit(item)}
-                style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
-                <View style={styles.rowMain}>
-                  <View style={styles.rowTitle}>
-                    <ThemedText type="smallBold">{item.name}</ThemedText>
-                    {expenseRow && (
-                      <StatusBadge paid={expenseRow.paid} onPress={() => toggleStatus(expenseRow)} />
-                    )}
+              <View style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
+                <Pressable onPress={() => openEdit(item)} style={styles.rowPress}>
+                  <View style={styles.rowMain}>
+                    <View style={styles.rowTitle}>
+                      <ThemedText type="smallBold">{item.name}</ThemedText>
+                      {expenseRow && (
+                        <StatusBadge
+                          paid={expenseRow.paid}
+                          onPress={() => toggleStatus(expenseRow)}
+                        />
+                      )}
+                    </View>
+                    <ThemedText type="small" themeColor="textSecondary">
+                      Dia {item.dueDay}
+                      {item.groupName ? ` · ${item.groupName}` : ''} · {itemRecurrenceLabel(item)}
+                    </ThemedText>
                   </View>
-                  <ThemedText type="small" themeColor="textSecondary">
-                    Dia {item.dueDay}
-                    {item.groupName ? ` · ${item.groupName}` : ''} · {recurrenceLabel(item.recurrence)}
-                  </ThemedText>
-                </View>
-                <ThemedText style={{ color: amountColor }}>{formatBrl(item.amount)}</ThemedText>
-              </Pressable>
+                  <ThemedText style={{ color: amountColor }}>{formatBrl(item.amount)}</ThemedText>
+                </Pressable>
+                <Pressable
+                  onPress={() => openEdit(item)}
+                  hitSlop={8}
+                  style={[styles.editButton, { backgroundColor: theme.background }]}>
+                  <Ionicons name="create-outline" size={18} color={theme.text} />
+                </Pressable>
+              </View>
             </SwipeRow>
           );
         }}
       />
 
+      {visibleRows.length > 0 && (
+        <View
+          style={[
+            styles.totalsFooter,
+            { bottom: footerBottom, backgroundColor: theme.backgroundSelected },
+          ]}>
+          <Pressable
+            onPress={() => setTotalsCollapsed((v) => !v)}
+            style={styles.totalsHeader}
+            hitSlop={6}>
+            <ThemedText type="smallBold">
+              {totalsCollapsed ? `Total · ${formatBrl(grandTotal)}` : 'Somatórios'}
+            </ThemedText>
+            <Ionicons
+              name={totalsCollapsed ? 'chevron-up' : 'chevron-down'}
+              size={18}
+              color={theme.textSecondary}
+            />
+          </Pressable>
+          {!totalsCollapsed && (
+            <>
+              {groupTotals.map((g) => (
+                <View key={g.id} style={styles.totalRow}>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    {g.name}
+                  </ThemedText>
+                  <ThemedText type="small" style={{ color: amountColor }}>
+                    {formatBrl(g.total)}
+                  </ThemedText>
+                </View>
+              ))}
+              <View style={[styles.totalRow, styles.totalRowGrand]}>
+                <ThemedText type="smallBold">Total</ThemedText>
+                <ThemedText type="smallBold" style={{ color: amountColor }}>
+                  {formatBrl(grandTotal)}
+                </ThemedText>
+              </View>
+            </>
+          )}
+        </View>
+      )}
+
       <UndoSnackbar
         visible={!!pending}
         onUndo={undo}
-        bottom={insets.bottom + BottomTabInset + Spacing.four}
+        bottom={footerBottom + (visibleRows.length > 0 ? (totalsCollapsed ? 52 : 88) : 0)}
       />
 
       <ItemFormModal
@@ -372,8 +572,31 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
         title={editing ? `Editar ${noun}` : `Nova ${noun}`}
         initial={editing}
         groups={groups}
-        onClose={() => setModalOpen(false)}
+        childDebits={isExpense ? childDebits : undefined}
+        onEditChild={(child) => {
+          setEditingChild(child);
+          setChildModalOpen(true);
+        }}
+        onDeleteChild={(child) => {
+          handleDeleteChild(child).catch(console.error);
+        }}
+        onClose={() => {
+          setModalOpen(false);
+          setChildDebits([]);
+        }}
         onSave={handleSave}
+      />
+
+      <ItemFormModal
+        visible={childModalOpen}
+        title="Editar débito do mês"
+        initial={editingChild}
+        groups={groups}
+        onClose={() => {
+          setChildModalOpen(false);
+          setEditingChild(null);
+        }}
+        onSave={handleSaveChild}
       />
     </>
   );
@@ -584,8 +807,65 @@ const styles = StyleSheet.create({
     borderRadius: Spacing.three,
     gap: Spacing.two,
   },
+  rowPress: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
   rowMain: { flex: 1, gap: 2 },
-  rowTitle: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  rowTitle: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two, flexWrap: 'wrap' },
+  editButton: {
+    width: 36,
+    height: 36,
+    borderRadius: Spacing.two,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  groupFilter: { gap: Spacing.one },
+  groupChips: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+    paddingRight: Spacing.two,
+  },
+  groupChip: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one,
+    borderRadius: Spacing.three,
+  },
+  groupChipClear: {
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.one,
+  },
+  groupChipSelectedText: { color: '#fff', fontWeight: '600' },
+  totalsFooter: {
+    position: 'absolute',
+    left: Spacing.three,
+    right: Spacing.three,
+    maxWidth: MaxContentWidth,
+    alignSelf: 'center',
+    borderRadius: Spacing.three,
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    gap: Spacing.one,
+  },
+  totalsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  totalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  totalRowGrand: {
+    marginTop: Spacing.one,
+    paddingTop: Spacing.one,
+    borderTopWidth: StyleSheet.hairlineWidth,
+    borderTopColor: 'rgba(128,128,128,0.35)',
+  },
   empty: { textAlign: 'center', marginTop: Spacing.six, paddingHorizontal: Spacing.three },
   snackbar: {
     position: 'absolute',

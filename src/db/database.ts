@@ -22,7 +22,11 @@ CREATE TABLE IF NOT EXISTS expenses (
   end_date TEXT,
   group_id TEXT REFERENCES groups(id) ON DELETE SET NULL,
   active INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  parent_id TEXT,
+  year_month TEXT,
+  paid INTEGER NOT NULL DEFAULT 0,
+  paid_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS incomes (
@@ -45,13 +49,55 @@ CREATE TABLE IF NOT EXISTS payments (
   paid_at TEXT NOT NULL,
   UNIQUE(expense_id, year_month)
 );
+
+CREATE TABLE IF NOT EXISTS expense_child_skips (
+  parent_id TEXT NOT NULL,
+  year_month TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (parent_id, year_month)
+);
 `;
+
+async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
+  const columns = await db.getAllAsync<{ name: string }>('PRAGMA table_info(expenses)');
+  const names = new Set(columns.map((c) => c.name));
+
+  // Bancos antigos: CREATE TABLE IF NOT EXISTS não altera colunas — migrar aqui primeiro.
+  if (!names.has('parent_id')) {
+    await db.execAsync('ALTER TABLE expenses ADD COLUMN parent_id TEXT');
+  }
+  if (!names.has('year_month')) {
+    await db.execAsync('ALTER TABLE expenses ADD COLUMN year_month TEXT');
+  }
+  if (!names.has('paid')) {
+    await db.execAsync('ALTER TABLE expenses ADD COLUMN paid INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!names.has('paid_at')) {
+    await db.execAsync('ALTER TABLE expenses ADD COLUMN paid_at TEXT');
+  }
+
+  await db.execAsync(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_expense_child_month
+      ON expenses(parent_id, year_month)
+      WHERE parent_id IS NOT NULL AND year_month IS NOT NULL
+  `);
+
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS expense_child_skips (
+      parent_id TEXT NOT NULL,
+      year_month TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (parent_id, year_month)
+    )
+  `);
+}
 
 export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (!dbPromise) {
     dbPromise = (async () => {
       const db = await SQLite.openDatabaseAsync('expense-track.db');
       await db.execAsync(SCHEMA);
+      await migrate(db);
       return db;
     })();
   }
