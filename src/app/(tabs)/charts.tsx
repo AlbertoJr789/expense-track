@@ -27,6 +27,9 @@ export default function ChartsScreen() {
   const expenseDelta =
     latest && previous ? latest.expenseTotal - previous.expenseTotal : 0;
 
+  const monthlyExpense = latest?.expenseTotal ?? 0;
+  const desiredReserve = monthlyExpense * 12;
+
   return (
     <ThemedView style={styles.container}>
       <ScrollView
@@ -41,6 +44,17 @@ export default function ChartsScreen() {
         <ThemedText themeColor="textSecondary">
           Comparativo de despesas e receitas recorrentes (últimos 12 meses)
         </ThemedText>
+
+        <View style={[styles.reserveCard, { backgroundColor: theme.backgroundElement }]}>
+          <ThemedText type="smallBold">Reserva desejável</ThemedText>
+          <ThemedText style={[styles.reserveValue, { color: theme.accent }]}>
+            {formatBrl(desiredReserve)}
+          </ThemedText>
+          <ThemedText type="small" themeColor="textSecondary">
+            Valor que você deveria ter guardado para manter suas despesas por 1 ano — calculado
+            como as despesas mensais ({formatBrl(monthlyExpense)}) multiplicadas por 12.
+          </ThemedText>
+        </View>
 
         {latest && previous && (
           <View style={[styles.insight, { backgroundColor: theme.backgroundElement }]}>
@@ -143,6 +157,16 @@ const styles = StyleSheet.create({
     borderRadius: Spacing.three,
     gap: Spacing.one,
     marginTop: Spacing.two,
+  },
+  reserveCard: {
+    padding: Spacing.four,
+    borderRadius: Spacing.three,
+    gap: Spacing.one,
+    marginTop: Spacing.three,
+  },
+  reserveValue: {
+    fontSize: 28,
+    fontWeight: '800',
   },
   legend: { flexDirection: 'row', gap: Spacing.four },
   legendItem: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },

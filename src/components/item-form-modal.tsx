@@ -1,3 +1,4 @@
+import Ionicons from '@expo/vector-icons/Ionicons';
 import {
   Modal,
   Pressable,
@@ -119,10 +120,10 @@ export function ItemFormModal({ visible, title, initial, groups, onClose, onSave
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <ThemedView style={styles.container}>
         <View style={styles.header}>
-          <ThemedText type="subtitle">{title}</ThemedText>
-          <Pressable onPress={onClose}>
-            <ThemedText type="linkPrimary">Fechar</ThemedText>
+          <Pressable onPress={onClose} hitSlop={10} style={styles.backButton}>
+            <Ionicons name="chevron-back" size={26} color={theme.text} />
           </Pressable>
+          <ThemedText type="subtitle">{title}</ThemedText>
         </View>
 
         <ScrollView contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled">
@@ -277,11 +278,14 @@ const styles = StyleSheet.create({
   container: { flex: 1 },
   header: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    gap: Spacing.two,
     paddingHorizontal: Spacing.four,
     paddingTop: Spacing.four,
     paddingBottom: Spacing.two,
+  },
+  backButton: {
+    marginLeft: -Spacing.one,
   },
   form: {
     padding: Spacing.four,

@@ -1,6 +1,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 import * as repo from '@/db/repository';
+import { seedIfEmpty } from '@/db/seed';
 import type {
   Expense,
   ExpenseInput,
@@ -67,7 +68,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   useEffect(() => {
-    refresh().catch(console.error);
+    (async () => {
+      await seedIfEmpty();
+      await refresh();
+    })().catch(console.error);
   }, [refresh]);
 
   const createGroup = useCallback(
