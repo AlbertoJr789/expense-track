@@ -1,5 +1,6 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
+import { exportBackup, importBackup } from '@/db/backup';
 import * as repo from '@/db/repository';
 import { seedIfEmpty } from '@/db/seed';
 import type {
@@ -53,6 +54,9 @@ type DataContextValue = {
   }>;
   togglePayment: (expenseChildId: string, paid: boolean) => Promise<void>;
   getMonthSeries: (months?: number) => Promise<MonthSeriesPoint[]>;
+  exportBackup: () => Promise<void>;
+  /** Importa backup JSON; retorna false se o usuário cancelar. */
+  importBackup: () => Promise<boolean>;
 };
 
 const DataContext = createContext<DataContextValue | null>(null);
@@ -232,14 +236,18 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const getMonthSeries = useCallback(async (_months = 12): Promise<MonthSeriesPoint[]> => {
     const current = currentYearMonth();
-    const earliest = (await repo.getEarliestDataYearMonth()) ?? current;
+    const [earliestRaw, allIncomes] = await Promise.all([
+      repo.getEarliestDataYearMonth(),
+      repo.listIncomes(),
+    ]);
+    const earliest = earliestRaw ?? current;
     const start = earliest > current ? current : earliest;
     const monthsList = yearMonthsRange(start, current);
     const points: MonthSeriesPoint[] = [];
 
     for (const yearMonth of monthsList) {
       const children = await repo.listExpenseChildren(yearMonth);
-      const monthIncomes = filterActiveInMonth(incomes, yearMonth);
+      const monthIncomes = filterActiveInMonth(allIncomes, yearMonth);
       points.push({
         yearMonth,
         label: yearMonthLabel(yearMonth),
@@ -252,7 +260,17 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     const firstWithData = points.findIndex((p) => p.expenseTotal > 0 || p.incomeTotal > 0);
     if (firstWithData === -1) return points.length ? [points[points.length - 1]] : [];
     return points.slice(firstWithData);
-  }, [incomes]);
+  }, []);
+
+  const handleExportBackup = useCallback(async () => {
+    await exportBackup();
+  }, []);
+
+  const handleImportBackup = useCallback(async () => {
+    const imported = await importBackup();
+    if (imported) await refresh();
+    return imported;
+  }, [refresh]);
 
   const value = useMemo(
     () => ({
@@ -277,6 +295,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       getMonthDashboard,
       togglePayment,
       getMonthSeries,
+      exportBackup: handleExportBackup,
+      importBackup: handleImportBackup,
     }),
     [
       ready,
@@ -300,6 +320,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       getMonthDashboard,
       togglePayment,
       getMonthSeries,
+      handleExportBackup,
+      handleImportBackup,
     ]
   );
 

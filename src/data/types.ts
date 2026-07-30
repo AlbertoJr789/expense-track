@@ -73,3 +73,20 @@ export type MonthSeriesPoint = {
   expenseTotal: number;
   incomeTotal: number;
 };
+
+export type ExpenseChildSkip = {
+  parentId: string;
+  yearMonth: string;
+  createdAt: string;
+};
+
+/** Formato do arquivo JSON de backup (versão 1). */
+export type BackupPayload = {
+  version: 1;
+  exportedAt: string;
+  groups: Group[];
+  expenses: Expense[];
+  incomes: Income[];
+  skips: ExpenseChildSkip[];
+  payments: Payment[];
+};

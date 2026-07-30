@@ -1,5 +1,14 @@
 import { getDatabase } from '@/db/database';
-import type { Expense, ExpenseInput, Group, Income, IncomeInput, Payment } from '@/data/types';
+import type {
+  BackupPayload,
+  Expense,
+  ExpenseChildSkip,
+  ExpenseInput,
+  Group,
+  Income,
+  IncomeInput,
+  Payment,
+} from '@/data/types';
 import {
   clampDueDay,
   createId,
@@ -565,4 +574,157 @@ export async function unmarkExpensePaid(expenseId: string, yearMonth: string): P
     expenseId,
     yearMonth,
   ]);
+}
+
+type SkipRow = { parent_id: string; year_month: string; created_at: string };
+
+async function listAllSkips(): Promise<ExpenseChildSkip[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<SkipRow>('SELECT * FROM expense_child_skips');
+  return rows.map((r) => ({
+    parentId: r.parent_id,
+    yearMonth: r.year_month,
+    createdAt: r.created_at,
+  }));
+}
+
+async function listAllPayments(): Promise<Payment[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<PaymentRow>('SELECT * FROM payments');
+  return rows.map(mapPayment);
+}
+
+export async function exportBackupData(): Promise<BackupPayload> {
+  const [groups, expenses, incomes, skips, payments] = await Promise.all([
+    listGroups(),
+    listAllExpenses(),
+    listIncomes(),
+    listAllSkips(),
+    listAllPayments(),
+  ]);
+  return {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    groups,
+    expenses,
+    incomes,
+    skips,
+    payments,
+  };
+}
+
+function assertBackupPayload(raw: unknown): BackupPayload {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Arquivo de backup inválido');
+  }
+  const data = raw as Partial<BackupPayload>;
+  if (data.version !== 1) {
+    throw new Error('Versão de backup não suportada');
+  }
+  if (
+    !Array.isArray(data.groups) ||
+    !Array.isArray(data.expenses) ||
+    !Array.isArray(data.incomes) ||
+    !Array.isArray(data.skips)
+  ) {
+    throw new Error('Arquivo de backup incompleto');
+  }
+  return {
+    version: 1,
+    exportedAt: typeof data.exportedAt === 'string' ? data.exportedAt : new Date().toISOString(),
+    groups: data.groups,
+    expenses: data.expenses,
+    incomes: data.incomes,
+    skips: data.skips,
+    payments: Array.isArray(data.payments) ? data.payments : [],
+  };
+}
+
+/** Substitui todos os dados locais pelo conteúdo do backup. */
+export async function importBackupData(raw: unknown): Promise<void> {
+  const backup = assertBackupPayload(raw);
+  const db = await getDatabase();
+
+  const parents = backup.expenses.filter((e) => !e.yearMonth);
+  const children = backup.expenses.filter((e) => !!e.yearMonth);
+
+  await db.withTransactionAsync(async () => {
+    await db.execAsync(`
+      DELETE FROM payments;
+      DELETE FROM expense_child_skips;
+      DELETE FROM expenses;
+      DELETE FROM incomes;
+      DELETE FROM groups;
+    `);
+
+    for (const g of backup.groups) {
+      await db.runAsync('INSERT INTO groups (id, name, created_at) VALUES (?, ?, ?)', [
+        g.id,
+        g.name,
+        g.createdAt,
+      ]);
+    }
+
+    const insertExpense = async (e: Expense) => {
+      await db.runAsync(
+        `INSERT INTO expenses
+          (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at, parent_id, year_month, paid, paid_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          e.id,
+          e.name,
+          e.amount,
+          e.recurrence,
+          e.dueDay,
+          e.startDate,
+          e.endDate,
+          e.groupId,
+          e.active ? 1 : 0,
+          e.createdAt,
+          e.parentId,
+          e.yearMonth,
+          e.paid ? 1 : 0,
+          e.paidAt,
+        ]
+      );
+    };
+
+    for (const e of parents) await insertExpense(e);
+    for (const e of children) await insertExpense(e);
+
+    for (const i of backup.incomes) {
+      await db.runAsync(
+        `INSERT INTO incomes
+          (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          i.id,
+          i.name,
+          i.amount,
+          i.recurrence,
+          i.dueDay,
+          i.startDate,
+          i.endDate,
+          i.groupId,
+          i.active ? 1 : 0,
+          i.createdAt,
+        ]
+      );
+    }
+
+    for (const s of backup.skips) {
+      await db.runAsync(
+        `INSERT OR REPLACE INTO expense_child_skips (parent_id, year_month, created_at)
+         VALUES (?, ?, ?)`,
+        [s.parentId, s.yearMonth, s.createdAt]
+      );
+    }
+
+    for (const p of backup.payments) {
+      await db.runAsync(
+        `INSERT OR REPLACE INTO payments (id, expense_id, year_month, paid_at) VALUES (?, ?, ?, ?)`,
+        [p.id, p.expenseId, p.yearMonth, p.paidAt]
+      );
+    }
+  });
 }
