@@ -40,9 +40,9 @@ export async function seedIfEmpty(): Promise<void> {
 
   const startDate = `${currentYearMonth()}-01`;
 
-  const consumo = await repo.createGroup('Uso Consumo');
-  const esporte = await repo.createGroup('Esporte');
-  const outros = await repo.createGroup('Outros');
+  const consumo = await repo.createGroup('Uso Consumo', 'expense');
+  const esporte = await repo.createGroup('Esporte', 'expense');
+  const outros = await repo.createGroup('Outros', 'expense');
 
   async function addExpenses(items: SeedItem[], groupId: string) {
     for (const item of items) {

@@ -15,7 +15,14 @@ import { DateField } from '@/components/date-field';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
-import type { Expense, ExpenseInput, Group, Recurrence, RecurringItem } from '@/data/types';
+import type {
+  Expense,
+  ExpenseInput,
+  Group,
+  GroupKind,
+  Recurrence,
+  RecurringItem,
+} from '@/data/types';
 import {
   formatBrlMaskFromNumber,
   formatDateInput,
@@ -32,10 +39,13 @@ type Props = {
   title: string;
   initial?: RecurringItem | null;
   groups: Group[];
+  /** Filtra grupos pelo tipo do lançamento (Saída/Entrada). */
+  groupKind?: GroupKind;
   /** Filhos do lançamento pai (só quando editando template). */
   childDebits?: Expense[];
   onEditChild?: (child: Expense) => void;
   onDeleteChild?: (child: Expense) => void;
+  onAddChild?: () => void;
   onClose: () => void;
   onSave: (input: ExpenseInput) => Promise<void>;
 };
@@ -51,9 +61,11 @@ export function ItemFormModal({
   title,
   initial,
   groups,
+  groupKind,
   childDebits,
   onEditChild,
   onDeleteChild,
+  onAddChild,
   onClose,
   onSave,
 }: Props) {
@@ -71,6 +83,10 @@ export function ItemFormModal({
 
   const isChildEdit =
     !!initial && 'yearMonth' in initial && !!(initial as Expense).yearMonth;
+  const isParentEdit =
+    !!initial && 'yearMonth' in initial && !(initial as Expense).yearMonth && !isChildEdit;
+  const visibleGroups = groupKind ? groups.filter((g) => g.kind === groupKind) : groups;
+  const activeChildren = (childDebits ?? []).filter((c) => !c.excluded);
 
   useEffect(() => {
     if (!visible) return;
@@ -262,7 +278,7 @@ export function ItemFormModal({
                   Nenhum
                 </ThemedText>
               </Pressable>
-              {groups.map((g) => {
+              {visibleGroups.map((g) => {
                 const selected = groupId === g.id;
                 return (
                   <Pressable
@@ -308,13 +324,26 @@ export function ItemFormModal({
             <ThemedText style={styles.saveLabel}>{saving ? 'Salvando…' : 'Salvar'}</ThemedText>
           </Pressable>
 
-          {!isChildEdit && childDebits && childDebits.length > 0 && (
+          {!isChildEdit && childDebits !== undefined && (isParentEdit || activeChildren.length > 0) && (
             <View style={styles.childrenSection}>
-              <ThemedText type="smallBold">Débitos gerados</ThemedText>
-              <ThemedText type="small" themeColor="textSecondary">
-                Filhos deste lançamento recorrente
-              </ThemedText>
-              {childDebits.map((child) => (
+              <View style={styles.childrenHeader}>
+                <View style={{ flex: 1, gap: 2 }}>
+                  <ThemedText type="smallBold">Débitos gerados</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    Filhos deste lançamento recorrente
+                  </ThemedText>
+                </View>
+                {onAddChild && isParentEdit && (
+                  <Pressable
+                    onPress={onAddChild}
+                    style={[styles.addChildBtn, { backgroundColor: theme.accent }]}>
+                    <ThemedText type="small" style={styles.addChildLabel}>
+                      + Ocorrência
+                    </ThemedText>
+                  </Pressable>
+                )}
+              </View>
+              {activeChildren.map((child) => (
                 <View
                   key={child.id}
                   style={[styles.childRow, { backgroundColor: theme.backgroundElement }]}>
@@ -347,6 +376,11 @@ export function ItemFormModal({
                   </View>
                 </View>
               ))}
+              {activeChildren.length === 0 && (
+                <ThemedText type="small" themeColor="textSecondary">
+                  Nenhuma ocorrência gerada ainda.
+                </ThemedText>
+              )}
             </View>
           )}
 
@@ -411,6 +445,17 @@ const styles = StyleSheet.create({
   },
   saveLabel: { color: '#fff', fontWeight: '700' },
   childrenSection: { gap: Spacing.two, marginTop: Spacing.two },
+  childrenHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: Spacing.two,
+  },
+  addChildBtn: {
+    paddingHorizontal: Spacing.two,
+    paddingVertical: Spacing.one,
+    borderRadius: Spacing.two,
+  },
+  addChildLabel: { color: '#fff', fontWeight: '700' },
   childRow: {
     flexDirection: 'row',
     alignItems: 'center',

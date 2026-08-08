@@ -1,23 +1,37 @@
 import { getDatabase } from '@/db/database';
 import type {
+  Asset,
+  AssetInput,
+  AssetMovement,
+  AssetMovementInput,
+  AssetMovementKind,
+  AssetSeriesPoint,
+  AssetType,
+  AssetWithBalance,
   BackupPayload,
   Expense,
   ExpenseChildSkip,
   ExpenseInput,
   Group,
+  GroupKind,
   Income,
   IncomeInput,
   Payment,
+  TransactionSeries,
+  TransactionSeriesResult,
 } from '@/data/types';
 import {
+  addMonths,
   clampDueDay,
   createId,
   currentYearMonth,
   isActiveInMonth,
   monthBounds,
+  yearMonthLabel,
+  yearMonthsRange,
 } from '@/domain/recurrence';
 
-type GroupRow = { id: string; name: string; created_at: string };
+type GroupRow = { id: string; name: string; kind: string; created_at: string };
 type ExpenseRow = {
   id: string;
   name: string;
@@ -33,6 +47,7 @@ type ExpenseRow = {
   year_month: string | null;
   paid: number;
   paid_at: string | null;
+  excluded: number;
 };
 type IncomeRow = {
   id: string;
@@ -52,10 +67,32 @@ type PaymentRow = {
   year_month: string;
   paid_at: string;
 };
+type AssetRow = {
+  id: string;
+  name: string;
+  type: string;
+  notes: string | null;
+  active: number;
+  created_at: string;
+};
+type AssetMovementRow = {
+  id: string;
+  asset_id: string;
+  kind: string;
+  amount: number;
+  quantity: number | null;
+  date: string;
+  year_month: string;
+  created_at: string;
+};
 
 function mapRecurrence(value: string | null): Expense['recurrence'] {
   if (value === 'monthly' || value === 'semiannual') return value;
   return null;
+}
+
+function mapGroupKind(value: string | null | undefined): GroupKind {
+  return value === 'income' ? 'income' : 'expense';
 }
 
 function mapExpense(row: ExpenseRow): Expense {
@@ -74,6 +111,7 @@ function mapExpense(row: ExpenseRow): Expense {
     yearMonth: row.year_month,
     paid: row.paid === 1,
     paidAt: row.paid_at,
+    excluded: (row.excluded ?? 0) === 1,
   };
 }
 
@@ -93,7 +131,12 @@ function mapIncome(row: IncomeRow): Income {
 }
 
 function mapGroup(row: GroupRow): Group {
-  return { id: row.id, name: row.name, createdAt: row.created_at };
+  return {
+    id: row.id,
+    name: row.name,
+    kind: mapGroupKind(row.kind),
+    createdAt: row.created_at,
+  };
 }
 
 function mapPayment(row: PaymentRow): Payment {
@@ -105,26 +148,85 @@ function mapPayment(row: PaymentRow): Payment {
   };
 }
 
+function mapAssetType(value: string): AssetType {
+  if (value === 'rdb' || value === 'treasury') return value;
+  return 'stock';
+}
+
+function mapMovementKind(value: string): AssetMovementKind {
+  if (
+    value === 'sell' ||
+    value === 'contribution' ||
+    value === 'withdrawal' ||
+    value === 'yield'
+  ) {
+    return value;
+  }
+  return 'buy';
+}
+
+function mapAsset(row: AssetRow): Asset {
+  return {
+    id: row.id,
+    name: row.name,
+    type: mapAssetType(row.type),
+    notes: row.notes,
+    active: row.active === 1,
+    createdAt: row.created_at,
+  };
+}
+
+function mapAssetMovement(row: AssetMovementRow): AssetMovement {
+  return {
+    id: row.id,
+    assetId: row.asset_id,
+    kind: mapMovementKind(row.kind),
+    amount: row.amount,
+    quantity: row.quantity,
+    date: row.date,
+    yearMonth: row.year_month,
+    createdAt: row.created_at,
+  };
+}
+
+/** Sinal da movimentação no saldo (+ compra/aporte/rendimento, − venda/resgate). */
+export function movementSignedAmount(kind: AssetMovementKind, amount: number): number {
+  if (kind === 'sell' || kind === 'withdrawal') return -Math.abs(amount);
+  return Math.abs(amount);
+}
+
 export async function listGroups(): Promise<Group[]> {
   const db = await getDatabase();
-  const rows = await db.getAllAsync<GroupRow>('SELECT * FROM groups ORDER BY name COLLATE NOCASE');
+  const rows = await db.getAllAsync<GroupRow>(
+    'SELECT * FROM groups ORDER BY kind ASC, name COLLATE NOCASE'
+  );
   return rows.map(mapGroup);
 }
 
-export async function createGroup(name: string): Promise<Group> {
+export async function createGroup(name: string, kind: GroupKind = 'expense'): Promise<Group> {
   const db = await getDatabase();
-  const group: Group = { id: createId(), name: name.trim(), createdAt: new Date().toISOString() };
-  await db.runAsync('INSERT INTO groups (id, name, created_at) VALUES (?, ?, ?)', [
+  const group: Group = {
+    id: createId(),
+    name: name.trim(),
+    kind,
+    createdAt: new Date().toISOString(),
+  };
+  await db.runAsync('INSERT INTO groups (id, name, kind, created_at) VALUES (?, ?, ?, ?)', [
     group.id,
     group.name,
+    group.kind,
     group.createdAt,
   ]);
   return group;
 }
 
-export async function updateGroup(id: string, name: string): Promise<void> {
+export async function updateGroup(id: string, name: string, kind: GroupKind): Promise<void> {
   const db = await getDatabase();
-  await db.runAsync('UPDATE groups SET name = ? WHERE id = ?', [name.trim(), id]);
+  await db.runAsync('UPDATE groups SET name = ?, kind = ? WHERE id = ?', [
+    name.trim(),
+    kind,
+    id,
+  ]);
 }
 
 export async function deleteGroup(id: string): Promise<void> {
@@ -143,19 +245,31 @@ export async function listExpenseTemplates(): Promise<Expense[]> {
   return rows.map(mapExpense);
 }
 
-/** Débitos filhos (e avulsos) de um mês. */
+/** Débitos filhos (e avulsos) de um mês — não excluídos. */
 export async function listExpenseChildren(yearMonth: string): Promise<Expense[]> {
   const db = await getDatabase();
   const rows = await db.getAllAsync<ExpenseRow>(
     `SELECT * FROM expenses
-     WHERE year_month = ?
+     WHERE year_month = ? AND IFNULL(excluded, 0) = 0
      ORDER BY due_day ASC, name COLLATE NOCASE`,
     [yearMonth]
   );
   return rows.map(mapExpense);
 }
 
-/** Filhos gerados a partir de um template pai. */
+/** Saídas excluídas (soft-delete) de um mês. */
+export async function listExcludedExpenseChildren(yearMonth: string): Promise<Expense[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<ExpenseRow>(
+    `SELECT * FROM expenses
+     WHERE year_month = ? AND excluded = 1
+     ORDER BY due_day ASC, name COLLATE NOCASE`,
+    [yearMonth]
+  );
+  return rows.map(mapExpense);
+}
+
+/** Filhos gerados a partir de um template pai (inclui excluídos). */
 export async function listExpenseChildrenByParent(parentId: string): Promise<Expense[]> {
   const db = await getDatabase();
   const rows = await db.getAllAsync<ExpenseRow>(
@@ -177,9 +291,105 @@ export async function getEarliestDataYearMonth(): Promise<string | null> {
        SELECT substr(start_date, 1, 7) AS ym FROM expenses WHERE year_month IS NULL AND start_date IS NOT NULL
        UNION ALL
        SELECT substr(start_date, 1, 7) AS ym FROM incomes WHERE start_date IS NOT NULL
+       UNION ALL
+       SELECT year_month AS ym FROM asset_movements
      )`
   );
   return row?.earliest ?? null;
+}
+
+/** Último mês com filho de despesa (inclui futuros materializados). */
+export async function getLatestExpenseYearMonth(): Promise<string | null> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<{ latest: string | null }>(
+    `SELECT MAX(year_month) AS latest FROM expenses WHERE year_month IS NOT NULL`
+  );
+  return row?.latest ?? null;
+}
+
+/**
+ * Séries de valor por transação (template pai ou avulso) ao longo dos meses.
+ * Usado na aba Média do Acompanhamento.
+ */
+export async function getTransactionSeries(): Promise<TransactionSeriesResult> {
+  const current = currentYearMonth();
+  const [earliestRaw, latestExpenseYm, templates, allExpenses] = await Promise.all([
+    getEarliestDataYearMonth(),
+    getLatestExpenseYearMonth(),
+    listExpenseTemplates(),
+    listAllExpenses(),
+  ]);
+
+  const children = allExpenses.filter((e) => e.yearMonth && !e.excluded);
+  const earliest = earliestRaw ?? current;
+  const endCandidate = latestExpenseYm && latestExpenseYm > current ? latestExpenseYm : current;
+  const start = earliest > endCandidate ? endCandidate : earliest;
+  const monthsList = yearMonthsRange(start, endCandidate);
+
+  // Corta meses vazios no início.
+  const firstWithChild = monthsList.findIndex((ym) => children.some((c) => c.yearMonth === ym));
+  const months =
+    firstWithChild === -1
+      ? monthsList.length
+        ? [monthsList[monthsList.length - 1]]
+        : [current]
+      : monthsList.slice(firstWithChild);
+
+  const monthsMeta = months.map((yearMonth) => ({
+    yearMonth,
+    label: yearMonthLabel(yearMonth),
+  }));
+
+  // Agrupa filhos por parentId; avulsos usam o próprio id.
+  const byKey = new Map<
+    string,
+    { name: string; groupId: string | null; byMonth: Map<string, number> }
+  >();
+
+  for (const template of templates) {
+    byKey.set(template.id, {
+      name: template.name,
+      groupId: template.groupId,
+      byMonth: new Map(),
+    });
+  }
+
+  for (const child of children) {
+    const key = child.parentId ?? child.id;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.byMonth.set(child.yearMonth!, child.amount);
+      if (!child.parentId) {
+        existing.name = child.name;
+        existing.groupId = child.groupId;
+      }
+    } else {
+      byKey.set(key, {
+        name: child.name,
+        groupId: child.groupId,
+        byMonth: new Map([[child.yearMonth!, child.amount]]),
+      });
+    }
+  }
+
+  const series: TransactionSeries[] = Array.from(byKey.entries())
+    .map(([id, data]) => {
+      const amounts = months.map((ym) => data.byMonth.get(ym) ?? null);
+      const present = amounts.filter((a): a is number => a != null);
+      const average = present.length > 0 ? present.reduce((s, a) => s + a, 0) / present.length : 0;
+      return {
+        id,
+        name: data.name,
+        groupId: data.groupId,
+        amounts,
+        average,
+        occurrenceCount: present.length,
+      };
+    })
+    .filter((s) => s.occurrenceCount > 0)
+    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+
+  return { months: monthsMeta, series };
 }
 
 export async function listAllExpenses(): Promise<Expense[]> {
@@ -209,6 +419,7 @@ async function insertExpense(partial: {
   yearMonth: string | null;
   paid: boolean;
   paidAt?: string | null;
+  excluded?: boolean;
 }): Promise<Expense> {
   const db = await getDatabase();
   const paidAt = partial.paid ? (partial.paidAt ?? new Date().toISOString()) : null;
@@ -227,11 +438,12 @@ async function insertExpense(partial: {
     yearMonth: partial.yearMonth,
     paid: partial.paid,
     paidAt,
+    excluded: partial.excluded ?? false,
   };
   await db.runAsync(
     `INSERT INTO expenses
-      (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at, parent_id, year_month, paid, paid_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at, parent_id, year_month, paid, paid_at, excluded)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       item.id,
       item.name,
@@ -247,6 +459,7 @@ async function insertExpense(partial: {
       item.yearMonth,
       item.paid ? 1 : 0,
       item.paidAt,
+      item.excluded ? 1 : 0,
     ]
   );
   return item;
@@ -296,6 +509,58 @@ export async function createExpense(
     yearMonth,
     paid: false,
   });
+}
+
+/** Cria filho copiando dados do pai para o mês informado. */
+export async function createExpenseChildFromParent(
+  parentId: string,
+  yearMonth: string
+): Promise<Expense> {
+  const parent = await getExpenseById(parentId);
+  if (!parent || parent.yearMonth) {
+    throw new Error('Lançamento pai inválido');
+  }
+
+  const existing = await getExpenseChildForParentMonth(parentId, yearMonth);
+  if (existing && !existing.excluded) {
+    throw new Error(`Já existe ocorrência em ${yearMonthLabel(yearMonth)}`);
+  }
+  if (existing?.excluded) {
+    await restoreExpenseChild(existing.id);
+    return (await getExpenseById(existing.id))!;
+  }
+
+  const db = await getDatabase();
+  await db.runAsync(
+    'DELETE FROM expense_child_skips WHERE parent_id = ? AND year_month = ?',
+    [parentId, yearMonth]
+  );
+
+  return insertExpense({
+    name: parent.name,
+    amount: parent.amount,
+    recurrence: null,
+    dueDay: clampDueDay(parent.dueDay, yearMonth),
+    startDate: monthBounds(yearMonth).start,
+    endDate: monthBounds(yearMonth).end,
+    groupId: parent.groupId,
+    active: true,
+    parentId: parent.id,
+    yearMonth,
+    paid: false,
+  });
+}
+
+async function getExpenseChildForParentMonth(
+  parentId: string,
+  yearMonth: string
+): Promise<Expense | null> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<ExpenseRow>(
+    `SELECT * FROM expenses WHERE parent_id = ? AND year_month = ?`,
+    [parentId, yearMonth]
+  );
+  return row ? mapExpense(row) : null;
 }
 
 /** Atualiza o template (pai). Se syncYearMonth for informado, sincroniza o filho daquele mês. */
@@ -353,7 +618,7 @@ export async function updateExpense(
     await db.runAsync(
       `UPDATE expenses
        SET name = ?, amount = ?, due_day = ?, group_id = ?
-       WHERE parent_id = ? AND year_month = ?`,
+       WHERE parent_id = ? AND year_month = ? AND IFNULL(excluded, 0) = 0`,
       [
         input.name.trim(),
         input.amount,
@@ -378,20 +643,44 @@ export async function updateExpenseChild(
   );
 }
 
+/**
+ * Soft-delete de filho/avulso (excluded + skip).
+ * Hard-delete de template pai.
+ */
 export async function deleteExpense(id: string): Promise<void> {
   const db = await getDatabase();
   const existing = await getExpenseById(id);
+  if (!existing) return;
 
-  // Filho excluído manualmente: não regenerar na próxima materialização daquele mês.
-  if (existing?.parentId && existing.yearMonth) {
-    await db.runAsync(
-      `INSERT OR REPLACE INTO expense_child_skips (parent_id, year_month, created_at)
-       VALUES (?, ?, ?)`,
-      [existing.parentId, existing.yearMonth, new Date().toISOString()]
-    );
+  // Filho ou avulso do mês: soft-delete.
+  if (existing.yearMonth) {
+    if (existing.parentId) {
+      await db.runAsync(
+        `INSERT OR REPLACE INTO expense_child_skips (parent_id, year_month, created_at)
+         VALUES (?, ?, ?)`,
+        [existing.parentId, existing.yearMonth, new Date().toISOString()]
+      );
+    }
+    await db.runAsync('UPDATE expenses SET excluded = 1 WHERE id = ?', [id]);
+    return;
   }
 
   await db.runAsync('DELETE FROM expenses WHERE id = ?', [id]);
+}
+
+/** Restaura saída soft-deleted e remove skip correspondente. */
+export async function restoreExpenseChild(id: string): Promise<void> {
+  const db = await getDatabase();
+  const existing = await getExpenseById(id);
+  if (!existing?.yearMonth) return;
+
+  await db.runAsync('UPDATE expenses SET excluded = 0 WHERE id = ?', [id]);
+  if (existing.parentId) {
+    await db.runAsync(
+      'DELETE FROM expense_child_skips WHERE parent_id = ? AND year_month = ?',
+      [existing.parentId, existing.yearMonth]
+    );
+  }
 }
 
 let ensureMonthLock: Promise<void> = Promise.resolve();
@@ -405,9 +694,14 @@ export async function ensureExpenseChildrenForMonth(yearMonth: string): Promise<
   const run = async () => {
     const db = await getDatabase();
     const templates = await listExpenseTemplates();
-    const children = await listExpenseChildren(yearMonth);
+
+    // Inclui excluídos para não tentar recriar (UNIQUE + skip).
+    const allChildren = await db.getAllAsync<ExpenseRow>(
+      `SELECT * FROM expenses WHERE year_month = ?`,
+      [yearMonth]
+    );
     const byParent = new Map(
-      children.filter((c) => c.parentId).map((c) => [c.parentId as string, c])
+      allChildren.filter((c) => c.parent_id).map((c) => [c.parent_id as string, mapExpense(c)])
     );
 
     const skipRows = await db.getAllAsync<{ parent_id: string }>(
@@ -576,6 +870,152 @@ export async function unmarkExpensePaid(expenseId: string, yearMonth: string): P
   ]);
 }
 
+// —— Patrimônio ——
+
+export async function listAssets(): Promise<AssetWithBalance[]> {
+  const db = await getDatabase();
+  const assets = (await db.getAllAsync<AssetRow>('SELECT * FROM assets ORDER BY name COLLATE NOCASE')).map(
+    mapAsset
+  );
+  const movements = await listAllAssetMovements();
+  const balanceByAsset = new Map<string, number>();
+  for (const m of movements) {
+    const prev = balanceByAsset.get(m.assetId) ?? 0;
+    balanceByAsset.set(m.assetId, prev + movementSignedAmount(m.kind, m.amount));
+  }
+  return assets.map((a) => ({
+    ...a,
+    balance: balanceByAsset.get(a.id) ?? 0,
+  }));
+}
+
+export async function getAssetById(id: string): Promise<Asset | null> {
+  const db = await getDatabase();
+  const row = await db.getFirstAsync<AssetRow>('SELECT * FROM assets WHERE id = ?', [id]);
+  return row ? mapAsset(row) : null;
+}
+
+export async function createAsset(input: AssetInput): Promise<Asset> {
+  const db = await getDatabase();
+  const asset: Asset = {
+    id: createId(),
+    name: input.name.trim(),
+    type: input.type,
+    notes: input.notes?.trim() || null,
+    active: input.active,
+    createdAt: new Date().toISOString(),
+  };
+  await db.runAsync(
+    `INSERT INTO assets (id, name, type, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    [asset.id, asset.name, asset.type, asset.notes, asset.active ? 1 : 0, asset.createdAt]
+  );
+  return asset;
+}
+
+export async function updateAsset(id: string, input: AssetInput): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync(
+    `UPDATE assets SET name = ?, type = ?, notes = ?, active = ? WHERE id = ?`,
+    [input.name.trim(), input.type, input.notes?.trim() || null, input.active ? 1 : 0, id]
+  );
+}
+
+export async function deleteAsset(id: string): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync('DELETE FROM asset_movements WHERE asset_id = ?', [id]);
+  await db.runAsync('DELETE FROM assets WHERE id = ?', [id]);
+}
+
+export async function listAssetMovements(assetId: string): Promise<AssetMovement[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<AssetMovementRow>(
+    `SELECT * FROM asset_movements WHERE asset_id = ? ORDER BY date DESC, created_at DESC`,
+    [assetId]
+  );
+  return rows.map(mapAssetMovement);
+}
+
+async function listAllAssetMovements(): Promise<AssetMovement[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<AssetMovementRow>(
+    `SELECT * FROM asset_movements ORDER BY date ASC, created_at ASC`
+  );
+  return rows.map(mapAssetMovement);
+}
+
+async function listAllAssets(): Promise<Asset[]> {
+  const db = await getDatabase();
+  const rows = await db.getAllAsync<AssetRow>('SELECT * FROM assets ORDER BY name COLLATE NOCASE');
+  return rows.map(mapAsset);
+}
+
+export async function createAssetMovement(
+  assetId: string,
+  input: AssetMovementInput
+): Promise<AssetMovement> {
+  const db = await getDatabase();
+  const yearMonth = input.date.slice(0, 7);
+  const movement: AssetMovement = {
+    id: createId(),
+    assetId,
+    kind: input.kind,
+    amount: Math.abs(input.amount),
+    quantity: input.quantity,
+    date: input.date,
+    yearMonth,
+    createdAt: new Date().toISOString(),
+  };
+  await db.runAsync(
+    `INSERT INTO asset_movements
+      (id, asset_id, kind, amount, quantity, date, year_month, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      movement.id,
+      movement.assetId,
+      movement.kind,
+      movement.amount,
+      movement.quantity,
+      movement.date,
+      movement.yearMonth,
+      movement.createdAt,
+    ]
+  );
+  return movement;
+}
+
+export async function deleteAssetMovement(id: string): Promise<void> {
+  const db = await getDatabase();
+  await db.runAsync('DELETE FROM asset_movements WHERE id = ?', [id]);
+}
+
+/** Série de saldo acumulado do patrimônio por mês. */
+export async function getAssetSeries(): Promise<AssetSeriesPoint[]> {
+  const movements = await listAllAssetMovements();
+  if (movements.length === 0) return [];
+
+  const earliest = movements[0].yearMonth;
+  const latest = movements[movements.length - 1].yearMonth;
+  const current = currentYearMonth();
+  const end = latest > current ? latest : current;
+  const months = yearMonthsRange(earliest, end);
+
+  const byMonth = new Map<string, number>();
+  for (const m of movements) {
+    const signed = movementSignedAmount(m.kind, m.amount);
+    byMonth.set(m.yearMonth, (byMonth.get(m.yearMonth) ?? 0) + signed);
+  }
+
+  let running = 0;
+  return months.map((yearMonth) => {
+    running += byMonth.get(yearMonth) ?? 0;
+    return {
+      yearMonth,
+      label: yearMonthLabel(yearMonth),
+      total: running,
+    };
+  });
+}
+
 type SkipRow = { parent_id: string; year_month: string; created_at: string };
 
 async function listAllSkips(): Promise<ExpenseChildSkip[]> {
@@ -595,21 +1035,25 @@ async function listAllPayments(): Promise<Payment[]> {
 }
 
 export async function exportBackupData(): Promise<BackupPayload> {
-  const [groups, expenses, incomes, skips, payments] = await Promise.all([
+  const [groups, expenses, incomes, skips, payments, assets, assetMovements] = await Promise.all([
     listGroups(),
     listAllExpenses(),
     listIncomes(),
     listAllSkips(),
     listAllPayments(),
+    listAllAssets(),
+    listAllAssetMovements(),
   ]);
   return {
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     groups,
     expenses,
     incomes,
     skips,
     payments,
+    assets,
+    assetMovements,
   };
 }
 
@@ -618,7 +1062,7 @@ function assertBackupPayload(raw: unknown): BackupPayload {
     throw new Error('Arquivo de backup inválido');
   }
   const data = raw as Partial<BackupPayload>;
-  if (data.version !== 1) {
+  if (data.version !== 1 && data.version !== 2) {
     throw new Error('Versão de backup não suportada');
   }
   if (
@@ -630,13 +1074,21 @@ function assertBackupPayload(raw: unknown): BackupPayload {
     throw new Error('Arquivo de backup incompleto');
   }
   return {
-    version: 1,
+    version: data.version,
     exportedAt: typeof data.exportedAt === 'string' ? data.exportedAt : new Date().toISOString(),
-    groups: data.groups,
-    expenses: data.expenses,
+    groups: data.groups.map((g) => ({
+      ...g,
+      kind: mapGroupKind((g as Group).kind),
+    })),
+    expenses: data.expenses.map((e) => ({
+      ...e,
+      excluded: !!(e as Expense).excluded,
+    })),
     incomes: data.incomes,
     skips: data.skips,
     payments: Array.isArray(data.payments) ? data.payments : [],
+    assets: Array.isArray(data.assets) ? data.assets : [],
+    assetMovements: Array.isArray(data.assetMovements) ? data.assetMovements : [],
   };
 }
 
@@ -650,6 +1102,8 @@ export async function importBackupData(raw: unknown): Promise<void> {
 
   await db.withTransactionAsync(async () => {
     await db.execAsync(`
+      DELETE FROM asset_movements;
+      DELETE FROM assets;
       DELETE FROM payments;
       DELETE FROM expense_child_skips;
       DELETE FROM expenses;
@@ -658,18 +1112,19 @@ export async function importBackupData(raw: unknown): Promise<void> {
     `);
 
     for (const g of backup.groups) {
-      await db.runAsync('INSERT INTO groups (id, name, created_at) VALUES (?, ?, ?)', [
+      await db.runAsync('INSERT INTO groups (id, name, kind, created_at) VALUES (?, ?, ?, ?)', [
         g.id,
         g.name,
+        g.kind ?? 'expense',
         g.createdAt,
       ]);
     }
 
-    const insertExpense = async (e: Expense) => {
+    const insertExpenseRow = async (e: Expense) => {
       await db.runAsync(
         `INSERT INTO expenses
-          (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at, parent_id, year_month, paid, paid_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at, parent_id, year_month, paid, paid_at, excluded)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           e.id,
           e.name,
@@ -685,12 +1140,13 @@ export async function importBackupData(raw: unknown): Promise<void> {
           e.yearMonth,
           e.paid ? 1 : 0,
           e.paidAt,
+          e.excluded ? 1 : 0,
         ]
       );
     };
 
-    for (const e of parents) await insertExpense(e);
-    for (const e of children) await insertExpense(e);
+    for (const e of parents) await insertExpenseRow(e);
+    for (const e of children) await insertExpenseRow(e);
 
     for (const i of backup.incomes) {
       await db.runAsync(
@@ -726,5 +1182,34 @@ export async function importBackupData(raw: unknown): Promise<void> {
         [p.id, p.expenseId, p.yearMonth, p.paidAt]
       );
     }
+
+    for (const a of backup.assets) {
+      await db.runAsync(
+        `INSERT INTO assets (id, name, type, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+        [a.id, a.name, a.type, a.notes, a.active ? 1 : 0, a.createdAt]
+      );
+    }
+
+    for (const m of backup.assetMovements) {
+      await db.runAsync(
+        `INSERT INTO asset_movements
+          (id, asset_id, kind, amount, quantity, date, year_month, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [m.id, m.assetId, m.kind, m.amount, m.quantity, m.date, m.yearMonth, m.createdAt]
+      );
+    }
   });
+}
+
+/** Sugere o próximo mês sem filho ativo para o pai. */
+export function suggestNextChildMonth(existing: Expense[], fromYm = currentYearMonth()): string {
+  const taken = new Set(
+    existing.filter((c) => c.yearMonth && !c.excluded).map((c) => c.yearMonth as string)
+  );
+  let cursor = fromYm;
+  for (let i = 0; i < 120; i += 1) {
+    if (!taken.has(cursor)) return cursor;
+    cursor = addMonths(cursor, 1);
+  }
+  return cursor;
 }

@@ -1,9 +1,24 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { FlatList, Pressable, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import {
+  ActivityIndicator,
+  Alert,
+  FlatList,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  TextInput,
+  View,
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useFocusEffect } from 'expo-router';
 
+import {
+  AssetFormModal,
+  AssetMovementFormModal,
+  assetTypeLabel,
+  movementKindLabel,
+} from '@/components/asset-form-modal';
 import { GroupFormModal } from '@/components/group-form-modal';
 import { ItemFormModal } from '@/components/item-form-modal';
 import { SwipeRow } from '@/components/swipe-row';
@@ -12,14 +27,20 @@ import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useData } from '@/data/DataProvider';
 import type {
+  AssetInput,
+  AssetMovement,
+  AssetMovementInput,
+  AssetWithBalance,
   Expense,
   ExpenseInput,
   Group,
+  GroupKind,
   IncomeInput,
   MonthExpenseRow,
   MonthIncomeRow,
   RecurringItem,
 } from '@/data/types';
+import { formatDateInput } from '@/domain/format';
 import {
   addMonths,
   currentYearMonth,
@@ -27,15 +48,17 @@ import {
   recurrenceLabel,
   yearMonthLabel,
 } from '@/domain/recurrence';
+import { movementSignedAmount, suggestNextChildMonth } from '@/db/repository';
 import { useTheme } from '@/hooks/use-theme';
 
-type Segment = 'expenses' | 'incomes' | 'groups';
+type Segment = 'expenses' | 'incomes' | 'groups' | 'assets';
 type CreateRef = RefObject<(() => void) | null>;
 
 const SEGMENTS: { value: Segment; label: string }[] = [
   { value: 'expenses', label: 'Saídas' },
   { value: 'incomes', label: 'Entradas' },
   { value: 'groups', label: 'Grupos' },
+  { value: 'assets', label: 'Patrimônio' },
 ];
 
 const PAGE_SIZE = 12;
@@ -58,14 +81,20 @@ export default function LancamentosScreen() {
             <ThemedText style={styles.addLabel}>+ Nova</ThemedText>
           </Pressable>
         </View>
-        <View style={[styles.segment, { backgroundColor: theme.backgroundElement }]}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={[styles.segment, { backgroundColor: theme.backgroundElement }]}>
           {SEGMENTS.map((s) => {
             const selected = segment === s.value;
             return (
               <Pressable
                 key={s.value}
                 onPress={() => setSegment(s.value)}
-                style={[styles.segmentItem, selected && { backgroundColor: theme.background }]}>
+                style={[
+                  styles.segmentItem,
+                  selected && { backgroundColor: theme.background },
+                ]}>
                 <ThemedText
                   type={selected ? 'smallBold' : 'small'}
                   themeColor={selected ? 'text' : 'textSecondary'}>
@@ -74,12 +103,13 @@ export default function LancamentosScreen() {
               </Pressable>
             );
           })}
-        </View>
+        </ScrollView>
       </View>
 
       {segment === 'expenses' && <ItemsSection kind="expense" createRef={createRef} />}
       {segment === 'incomes' && <ItemsSection kind="income" createRef={createRef} />}
       {segment === 'groups' && <GroupsSection createRef={createRef} />}
+      {segment === 'assets' && <AssetsSection createRef={createRef} />}
     </ThemedView>
   );
 }
@@ -217,22 +247,34 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
     updateExpense,
     updateExpenseChild,
     deleteExpense,
+    restoreExpenseChild,
+    createExpenseChildFromParent,
     createIncome,
     updateIncome,
     deleteIncome,
     getExpenseForEdit,
     listExpenseChildrenByParent,
+    listExcludedExpenseChildren,
+    ensureMonthOccurrences,
   } = useData();
 
   const isExpense = kind === 'expense';
   const noun = isExpense ? 'saída' : 'entrada';
+  const groupKind: GroupKind = isExpense ? 'expense' : 'income';
   const amountColor = isExpense ? theme.expense : theme.income;
+  const kindGroups = useMemo(
+    () => groups.filter((g) => g.kind === groupKind),
+    [groups, groupKind]
+  );
 
   const [month, setMonth] = useState(currentYearMonth());
   const [query, setQuery] = useState('');
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [showExcluded, setShowExcluded] = useState(false);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [rows, setRows] = useState<(MonthExpenseRow | MonthIncomeRow)[]>([]);
+  const [excludedRows, setExcludedRows] = useState<Expense[]>([]);
+  const [generating, setGenerating] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<RecurringItem | Expense | null>(null);
   const [childDebits, setChildDebits] = useState<Expense[]>([]);
@@ -242,8 +284,15 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
 
   const load = useCallback(async () => {
     const data = await getMonthDashboard(month);
-    setRows(isExpense ? data.expenses : data.incomes);
-  }, [getMonthDashboard, month, isExpense]);
+    if (isExpense) {
+      setRows(data.expenses);
+      const excluded = await listExcludedExpenseChildren(month);
+      setExcludedRows(excluded);
+    } else {
+      setRows(data.incomes);
+      setExcludedRows([]);
+    }
+  }, [getMonthDashboard, listExcludedExpenseChildren, month, isExpense]);
 
   useFocusEffect(
     useCallback(() => {
@@ -254,8 +303,9 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
   const commitDelete = useCallback(
     async (item: RecurringItem) => {
       await (isExpense ? deleteExpense : deleteIncome)(item.id);
+      await load();
     },
-    [isExpense, deleteExpense, deleteIncome]
+    [isExpense, deleteExpense, deleteIncome, load]
   );
 
   const { pending, remove, undo } = useSoftDelete(commitDelete);
@@ -273,9 +323,25 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
     };
   }, [createRef, openCreate]);
 
+  const sourceRows = useMemo(() => {
+    if (isExpense && showExcluded) {
+      return excludedRows.map(
+        (e) =>
+          ({
+            ...e,
+            groupName: e.groupId
+              ? groups.find((g) => g.id === e.groupId)?.name ?? null
+              : null,
+            isNext: false,
+          }) satisfies MonthExpenseRow
+      );
+    }
+    return rows;
+  }, [isExpense, showExcluded, excludedRows, rows, groups]);
+
   const visibleRows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let list = rows;
+    let list = sourceRows;
     if (q) list = list.filter((r) => r.name.toLowerCase().includes(q));
     if (selectedGroupIds.length > 0) {
       const set = new Set(selectedGroupIds);
@@ -283,7 +349,7 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
     }
     if (pending) list = list.filter((r) => r.id !== pending.id);
     return list;
-  }, [rows, query, selectedGroupIds, pending]);
+  }, [sourceRows, query, selectedGroupIds, pending]);
 
   const paged = useMemo(() => visibleRows.slice(0, visibleCount), [visibleRows, visibleCount]);
 
@@ -386,6 +452,38 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
     await load();
   }
 
+  async function handleAddChild() {
+    if (!editing || (editing as Expense).yearMonth) return;
+    const parentId = editing.id;
+    const ym = suggestNextChildMonth(childDebits, month);
+    try {
+      const child = await createExpenseChildFromParent(parentId, ym);
+      await refreshChildDebits(parentId);
+      await load();
+      setEditingChild(child);
+      setChildModalOpen(true);
+    } catch (e) {
+      Alert.alert('Não foi possível criar', e instanceof Error ? e.message : 'Tente outro mês.');
+    }
+  }
+
+  async function handleGenerateRecurrences() {
+    setGenerating(true);
+    try {
+      await ensureMonthOccurrences(month);
+      await load();
+    } catch (e) {
+      Alert.alert('Erro', e instanceof Error ? e.message : 'Falha ao gerar recorrências.');
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function handleRestore(item: Expense) {
+    await restoreExpenseChild(item.id);
+    await load();
+  }
+
   async function toggleStatus(item: MonthExpenseRow) {
     await togglePayment(item.id, !item.paid);
     await load();
@@ -402,6 +500,8 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
   }
 
   const footerBottom = insets.bottom + BottomTabInset + Spacing.two;
+  const showGenerate =
+    isExpense && !showExcluded && rows.length === 0 && !query.trim() && selectedGroupIds.length === 0;
 
   return (
     <>
@@ -415,7 +515,46 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
           </View>
         </View>
 
-        {groups.length > 0 && (
+        {isExpense && (
+          <View style={styles.excludedRow}>
+            <Pressable
+              onPress={() => {
+                setShowExcluded((v) => !v);
+                setVisibleCount(PAGE_SIZE);
+              }}
+              style={[
+                styles.groupChip,
+                {
+                  backgroundColor: showExcluded ? theme.accent : theme.backgroundElement,
+                },
+              ]}>
+              <ThemedText
+                type="small"
+                style={showExcluded ? styles.groupChipSelectedText : undefined}
+                themeColor={showExcluded ? undefined : 'textSecondary'}>
+                Excluídas{excludedRows.length > 0 ? ` (${excludedRows.length})` : ''}
+              </ThemedText>
+            </Pressable>
+            {!showExcluded && (
+              <Pressable
+                onPress={handleGenerateRecurrences}
+                disabled={generating}
+                style={[
+                  styles.groupChip,
+                  {
+                    backgroundColor: theme.backgroundElement,
+                    opacity: generating ? 0.6 : 1,
+                  },
+                ]}>
+                <ThemedText type="small" themeColor="textSecondary">
+                  {generating ? 'Gerando…' : 'Gerar recorrências'}
+                </ThemedText>
+              </Pressable>
+            )}
+          </View>
+        )}
+
+        {kindGroups.length > 0 && (
           <View style={styles.groupFilter}>
             <ThemedText type="small" themeColor="textSecondary">
               Grupos
@@ -425,7 +564,7 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
               showsHorizontalScrollIndicator={false}
               contentContainerStyle={styles.groupChips}
               decelerationRate="fast">
-              {groups.map((g) => {
+              {kindGroups.map((g) => {
                 const selected = selectedGroupIds.includes(g.id);
                 return (
                   <Pressable
@@ -434,9 +573,7 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
                     style={[
                       styles.groupChip,
                       {
-                        backgroundColor: selected
-                          ? theme.accent
-                          : theme.backgroundElement,
+                        backgroundColor: selected ? theme.accent : theme.backgroundElement,
                       },
                     ]}>
                     <ThemedText
@@ -473,19 +610,59 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
         onEndReached={() => {
           setVisibleCount((c) => (c < visibleRows.length ? c + PAGE_SIZE : c));
         }}
-        contentContainerStyle={[
-          styles.list,
-          { paddingBottom: footerBottom + 120 },
-        ]}
+        contentContainerStyle={[styles.list, { paddingBottom: footerBottom + 120 }]}
         ListEmptyComponent={
-          <ThemedText themeColor="textSecondary" style={styles.empty}>
-            {query.trim() || selectedGroupIds.length > 0
-              ? 'Nenhum resultado para os filtros.'
-              : `Nenhuma ${noun} ativa em ${yearMonthLabel(month)}.`}
-          </ThemedText>
+          <View style={styles.emptyBlock}>
+            <ThemedText themeColor="textSecondary" style={styles.empty}>
+              {query.trim() || selectedGroupIds.length > 0
+                ? 'Nenhum resultado para os filtros.'
+                : showExcluded
+                  ? `Nenhuma saída excluída em ${yearMonthLabel(month)}.`
+                  : `Nenhuma ${noun} ativa em ${yearMonthLabel(month)}.`}
+            </ThemedText>
+            {showGenerate && (
+              <Pressable
+                onPress={handleGenerateRecurrences}
+                disabled={generating}
+                style={[
+                  styles.generateBtn,
+                  { backgroundColor: theme.accent, opacity: generating ? 0.6 : 1 },
+                ]}>
+                {generating ? (
+                  <ActivityIndicator color="#fff" />
+                ) : (
+                  <ThemedText style={styles.generateLabel}>
+                    Gerar recorrências deste mês
+                  </ThemedText>
+                )}
+              </Pressable>
+            )}
+          </View>
         }
         renderItem={({ item }) => {
           const expenseRow = isExpense ? (item as MonthExpenseRow) : null;
+          if (showExcluded && expenseRow) {
+            return (
+              <View style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
+                <View style={styles.rowPress}>
+                  <View style={styles.rowMain}>
+                    <ThemedText type="smallBold">{item.name}</ThemedText>
+                    <ThemedText type="small" themeColor="textSecondary">
+                      Dia {item.dueDay}
+                      {item.groupName ? ` · ${item.groupName}` : ''}
+                    </ThemedText>
+                  </View>
+                  <ThemedText style={{ color: amountColor }}>{formatBrl(item.amount)}</ThemedText>
+                </View>
+                <Pressable
+                  onPress={() => handleRestore(expenseRow).catch(console.error)}
+                  hitSlop={8}
+                  style={[styles.editButton, { backgroundColor: theme.income }]}>
+                  <Ionicons name="arrow-undo-outline" size={18} color="#fff" />
+                </Pressable>
+              </View>
+            );
+          }
           return (
             <SwipeRow onDelete={() => remove(item)}>
               <View style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
@@ -519,7 +696,7 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
         }}
       />
 
-      {visibleRows.length > 0 && (
+      {visibleRows.length > 0 && !showExcluded && (
         <View
           style={[
             styles.totalsFooter,
@@ -564,14 +741,15 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
       <UndoSnackbar
         visible={!!pending}
         onUndo={undo}
-        bottom={footerBottom + (visibleRows.length > 0 ? (totalsCollapsed ? 52 : 88) : 0)}
+        bottom={footerBottom + (visibleRows.length > 0 && !showExcluded ? (totalsCollapsed ? 52 : 88) : 0)}
       />
 
       <ItemFormModal
         visible={modalOpen}
         title={editing ? `Editar ${noun}` : `Nova ${noun}`}
         initial={editing}
-        groups={groups}
+        groups={kindGroups}
+        groupKind={groupKind}
         childDebits={isExpense ? childDebits : undefined}
         onEditChild={(child) => {
           setEditingChild(child);
@@ -580,6 +758,9 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
         onDeleteChild={(child) => {
           handleDeleteChild(child).catch(console.error);
         }}
+        onAddChild={isExpense ? () => {
+          handleAddChild().catch(console.error);
+        } : undefined}
         onClose={() => {
           setModalOpen(false);
           setChildDebits([]);
@@ -591,7 +772,8 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
         visible={childModalOpen}
         title="Editar débito do mês"
         initial={editingChild}
-        groups={groups}
+        groups={kindGroups}
+        groupKind="expense"
         onClose={() => {
           setChildModalOpen(false);
           setEditingChild(null);
@@ -647,11 +829,11 @@ function GroupsSection({ createRef }: { createRef: CreateRef }) {
     setModalOpen(true);
   }
 
-  async function handleSave(name: string) {
+  async function handleSave(name: string, kind: GroupKind) {
     if (editing) {
-      await updateGroup(editing.id, name);
+      await updateGroup(editing.id, name, kind);
     } else {
-      await createGroup(name);
+      await createGroup(name, kind);
     }
   }
 
@@ -691,7 +873,12 @@ function GroupsSection({ createRef }: { createRef: CreateRef }) {
             <Pressable
               onPress={() => openEdit(item)}
               style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
-              <ThemedText>{item.name}</ThemedText>
+              <View style={styles.rowMain}>
+                <ThemedText>{item.name}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary">
+                  {item.kind === 'income' ? 'Entrada' : 'Saída'}
+                </ThemedText>
+              </View>
             </Pressable>
           </SwipeRow>
         )}
@@ -709,6 +896,227 @@ function GroupsSection({ createRef }: { createRef: CreateRef }) {
         initial={editing}
         onClose={() => setModalOpen(false)}
         onSave={handleSave}
+      />
+    </>
+  );
+}
+
+function AssetsSection({ createRef }: { createRef: CreateRef }) {
+  const theme = useTheme();
+  const insets = useSafeAreaInsets();
+  const {
+    assets,
+    createAsset,
+    updateAsset,
+    deleteAsset,
+    listAssetMovements,
+    createAssetMovement,
+    deleteAssetMovement,
+  } = useData();
+  const [query, setQuery] = useState('');
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editing, setEditing] = useState<AssetWithBalance | null>(null);
+  const [detailAsset, setDetailAsset] = useState<AssetWithBalance | null>(null);
+  const [movements, setMovements] = useState<AssetMovement[]>([]);
+  const [movementModalOpen, setMovementModalOpen] = useState(false);
+
+  useEffect(() => {
+    if (!detailAsset) return;
+    const fresh = assets.find((a) => a.id === detailAsset.id);
+    if (fresh) setDetailAsset(fresh);
+  }, [assets, detailAsset?.id]);
+
+  const commitDelete = useCallback(
+    async (item: AssetWithBalance) => {
+      await deleteAsset(item.id);
+    },
+    [deleteAsset]
+  );
+  const { pending, remove, undo } = useSoftDelete(commitDelete);
+
+  const openCreate = useCallback(() => {
+    setEditing(null);
+    setModalOpen(true);
+  }, []);
+
+  useEffect(() => {
+    createRef.current = openCreate;
+    return () => {
+      if (createRef.current === openCreate) createRef.current = null;
+    };
+  }, [createRef, openCreate]);
+
+  const visible = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    let list = assets;
+    if (q) list = list.filter((a) => a.name.toLowerCase().includes(q));
+    if (pending) list = list.filter((a) => a.id !== pending.id);
+    return list;
+  }, [assets, query, pending]);
+
+  async function openDetail(asset: AssetWithBalance) {
+    setDetailAsset(asset);
+    setMovements(await listAssetMovements(asset.id));
+  }
+
+  async function refreshMovements(assetId: string) {
+    setMovements(await listAssetMovements(assetId));
+  }
+
+  async function handleSaveAsset(input: AssetInput, firstMovement?: AssetMovementInput) {
+    if (editing) {
+      await updateAsset(editing.id, input);
+    } else {
+      await createAsset(input, firstMovement);
+    }
+  }
+
+  async function handleSaveMovement(input: AssetMovementInput) {
+    if (!detailAsset) return;
+    await createAssetMovement(detailAsset.id, input);
+    await refreshMovements(detailAsset.id);
+  }
+
+  if (detailAsset) {
+    return (
+      <>
+        <View style={styles.controls}>
+          <Pressable
+            onPress={() => setDetailAsset(null)}
+            style={styles.detailBack}
+            hitSlop={8}>
+            <Ionicons name="chevron-back" size={20} color={theme.text} />
+            <ThemedText type="smallBold">{detailAsset.name}</ThemedText>
+          </Pressable>
+          <View style={styles.detailActions}>
+            <Pressable
+              onPress={() => {
+                setEditing(detailAsset);
+                setModalOpen(true);
+              }}
+              style={[styles.editButton, { backgroundColor: theme.backgroundElement }]}>
+              <Ionicons name="create-outline" size={18} color={theme.text} />
+            </Pressable>
+            <Pressable
+              onPress={() => setMovementModalOpen(true)}
+              style={[styles.addButton, { backgroundColor: theme.accent }]}>
+              <ThemedText style={styles.addLabel}>+ Movimento</ThemedText>
+            </Pressable>
+          </View>
+          <ThemedText type="small" themeColor="textSecondary">
+            {assetTypeLabel(detailAsset.type)} · Saldo {formatBrl(detailAsset.balance)}
+          </ThemedText>
+        </View>
+
+        <FlatList
+          data={movements}
+          keyExtractor={(item) => item.id}
+          contentContainerStyle={[
+            styles.list,
+            { paddingBottom: BottomTabInset + insets.bottom + Spacing.six },
+          ]}
+          ListEmptyComponent={
+            <ThemedText themeColor="textSecondary" style={styles.empty}>
+              Nenhuma movimentação ainda.
+            </ThemedText>
+          }
+          renderItem={({ item }) => {
+            const signed = movementSignedAmount(item.kind, item.amount);
+            return (
+              <SwipeRow
+                onDelete={() => {
+                  deleteAssetMovement(item.id)
+                    .then(() => refreshMovements(detailAsset.id))
+                    .catch(console.error);
+                }}>
+                <View style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
+                  <View style={styles.rowMain}>
+                    <ThemedText type="smallBold">{movementKindLabel(item.kind)}</ThemedText>
+                    <ThemedText type="small" themeColor="textSecondary">
+                      {formatDateInput(item.date)}
+                    </ThemedText>
+                  </View>
+                  <ThemedText style={{ color: signed >= 0 ? theme.income : theme.expense }}>
+                    {formatBrl(signed)}
+                  </ThemedText>
+                </View>
+              </SwipeRow>
+            );
+          }}
+        />
+
+        <AssetFormModal
+          visible={modalOpen}
+          title="Editar patrimônio"
+          initial={editing}
+          onClose={() => {
+            setModalOpen(false);
+            setEditing(null);
+          }}
+          onSave={handleSaveAsset}
+        />
+        <AssetMovementFormModal
+          visible={movementModalOpen}
+          onClose={() => setMovementModalOpen(false)}
+          onSave={handleSaveMovement}
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <View style={styles.controls}>
+        <SearchInput value={query} onChange={setQuery} />
+      </View>
+
+      <FlatList
+        data={visible}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={[
+          styles.list,
+          { paddingBottom: BottomTabInset + insets.bottom + Spacing.six },
+        ]}
+        ListEmptyComponent={
+          <ThemedText themeColor="textSecondary" style={styles.empty}>
+            {query.trim() ? 'Nenhum resultado.' : 'Nenhum patrimônio cadastrado.'}
+          </ThemedText>
+        }
+        renderItem={({ item }) => (
+          <SwipeRow onDelete={() => remove(item)}>
+            <Pressable
+              onPress={() => openDetail(item).catch(console.error)}
+              style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
+              <View style={styles.rowMain}>
+                <ThemedText type="smallBold">{item.name}</ThemedText>
+                <ThemedText type="small" themeColor="textSecondary">
+                  {assetTypeLabel(item.type)}
+                </ThemedText>
+              </View>
+              <ThemedText style={{ color: item.balance >= 0 ? theme.income : theme.expense }}>
+                {formatBrl(item.balance)}
+              </ThemedText>
+            </Pressable>
+          </SwipeRow>
+        )}
+      />
+
+      <UndoSnackbar
+        visible={!!pending}
+        onUndo={undo}
+        bottom={insets.bottom + BottomTabInset + Spacing.four}
+      />
+
+      <AssetFormModal
+        visible={modalOpen}
+        title={editing ? 'Editar patrimônio' : 'Novo patrimônio'}
+        initial={editing}
+        requireFirstMovement={!editing}
+        onClose={() => {
+          setModalOpen(false);
+          setEditing(null);
+        }}
+        onSave={handleSaveAsset}
       />
     </>
   );
@@ -733,11 +1141,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     borderRadius: Spacing.three,
     padding: Spacing.half,
+    gap: Spacing.half,
   },
   segmentItem: {
-    flex: 1,
     alignItems: 'center',
     paddingVertical: Spacing.two,
+    paddingHorizontal: Spacing.three,
     borderRadius: Spacing.two,
   },
   controls: {
@@ -823,6 +1232,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   groupFilter: { gap: Spacing.one },
+  excludedRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
   groupChips: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -867,6 +1277,16 @@ const styles = StyleSheet.create({
     borderTopColor: 'rgba(128,128,128,0.35)',
   },
   empty: { textAlign: 'center', marginTop: Spacing.six, paddingHorizontal: Spacing.three },
+  emptyBlock: { gap: Spacing.three, alignItems: 'center' },
+  generateBtn: {
+    marginTop: Spacing.two,
+    paddingHorizontal: Spacing.four,
+    paddingVertical: Spacing.three,
+    borderRadius: Spacing.three,
+  },
+  generateLabel: { color: '#fff', fontWeight: '700' },
+  detailBack: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
+  detailActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   snackbar: {
     position: 'absolute',
     left: Spacing.four,

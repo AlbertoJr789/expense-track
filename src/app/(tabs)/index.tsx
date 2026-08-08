@@ -10,8 +10,8 @@ import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useData } from '@/data/DataProvider';
 import type { Expense, ExpenseInput, MonthExpenseRow, MonthSummary } from '@/data/types';
-import { currentYearMonth, formatBrl, yearMonthLabel } from '@/domain/recurrence';
 import { formatDateInput } from '@/domain/format';
+import { currentYearMonth, formatBrl, yearMonthLabel } from '@/domain/recurrence';
 import { useTheme } from '@/hooks/use-theme';
 
 function paidAtLabel(paidAt: string | null): string {
@@ -28,22 +28,19 @@ export default function MonthScreen() {
     groups,
     getMonthDashboard,
     togglePayment,
-    getExpenseForEdit,
-    updateExpense,
     updateExpenseChild,
-    deleteExpense,
-    listExpenseChildrenByParent,
     ensureMonthOccurrences,
   } = useData();
   const yearMonth = currentYearMonth();
+  const expenseGroups = useMemo(
+    () => groups.filter((g) => g.kind === 'expense'),
+    [groups]
+  );
   const [loading, setLoading] = useState(true);
   const [expenses, setExpenses] = useState<MonthExpenseRow[]>([]);
   const [summary, setSummary] = useState<MonthSummary | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Expense | null>(null);
-  const [childDebits, setChildDebits] = useState<Expense[]>([]);
-  const [childModalOpen, setChildModalOpen] = useState(false);
-  const [editingChild, setEditingChild] = useState<Expense | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -78,46 +75,20 @@ export default function MonthScreen() {
     await load();
   }
 
-  async function openEdit(item: MonthExpenseRow) {
-    const editable = await getExpenseForEdit(item.id);
-    if (!editable) return;
-    setEditing(editable);
-    if (!editable.yearMonth) {
-      setChildDebits(await listExpenseChildrenByParent(editable.id));
-    } else {
-      setChildDebits([]);
-    }
+  function openEdit(item: MonthExpenseRow) {
+    // Edita o débito do mês (filho/avulso), não o template pai.
+    setEditing(item);
     setModalOpen(true);
   }
 
   async function handleSave(input: ExpenseInput) {
     if (!editing) return;
-    await updateExpense(editing.id, input, yearMonth);
-    if (!editing.yearMonth) {
-      setChildDebits(await listExpenseChildrenByParent(editing.id));
-    }
-    await load();
-  }
-
-  async function handleSaveChild(input: ExpenseInput) {
-    if (!editingChild) return;
-    await updateExpenseChild(editingChild.id, {
+    await updateExpenseChild(editing.id, {
       name: input.name,
       amount: input.amount,
       dueDay: input.dueDay,
       groupId: input.groupId,
     });
-    if (editing && !editing.yearMonth) {
-      setChildDebits(await listExpenseChildrenByParent(editing.id));
-    }
-    await load();
-  }
-
-  async function handleDeleteChild(child: Expense) {
-    await deleteExpense(child.id);
-    if (editing && !editing.yearMonth) {
-      setChildDebits(await listExpenseChildrenByParent(editing.id));
-    }
     await load();
   }
 
@@ -243,34 +214,15 @@ export default function MonthScreen() {
 
       <ItemFormModal
         visible={modalOpen}
-        title="Editar lançamento"
+        title="Editar débito do mês"
         initial={editing}
-        groups={groups}
-        childDebits={childDebits}
-        onEditChild={(child) => {
-          setEditingChild(child);
-          setChildModalOpen(true);
-        }}
-        onDeleteChild={(child) => {
-          handleDeleteChild(child).catch(console.error);
-        }}
+        groups={expenseGroups}
+        groupKind="expense"
         onClose={() => {
           setModalOpen(false);
-          setChildDebits([]);
+          setEditing(null);
         }}
         onSave={handleSave}
-      />
-
-      <ItemFormModal
-        visible={childModalOpen}
-        title="Editar débito do mês"
-        initial={editingChild}
-        groups={groups}
-        onClose={() => {
-          setChildModalOpen(false);
-          setEditingChild(null);
-        }}
-        onSave={handleSaveChild}
       />
     </ThemedView>
   );

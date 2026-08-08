@@ -5,7 +5,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
-import type { Group } from '@/data/types';
+import type { Group, GroupKind } from '@/data/types';
 import { useTheme } from '@/hooks/use-theme';
 
 type Props = {
@@ -13,18 +13,25 @@ type Props = {
   title: string;
   initial?: Group | null;
   onClose: () => void;
-  onSave: (name: string) => Promise<void>;
+  onSave: (name: string, kind: GroupKind) => Promise<void>;
 };
+
+const KIND_OPTIONS: { value: GroupKind; label: string }[] = [
+  { value: 'expense', label: 'Saída' },
+  { value: 'income', label: 'Entrada' },
+];
 
 export function GroupFormModal({ visible, title, initial, onClose, onSave }: Props) {
   const theme = useTheme();
   const [name, setName] = useState('');
+  const [kind, setKind] = useState<GroupKind>('expense');
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (!visible) return;
     setName(initial?.name ?? '');
+    setKind(initial?.kind ?? 'expense');
     setError(null);
   }, [visible, initial]);
 
@@ -36,7 +43,7 @@ export function GroupFormModal({ visible, title, initial, onClose, onSave }: Pro
     }
     setSaving(true);
     try {
-      await onSave(trimmed);
+      await onSave(trimmed, kind);
       onClose();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Erro ao salvar.');
@@ -69,6 +76,31 @@ export function GroupFormModal({ visible, title, initial, onClose, onSave }: Pro
               autoFocus
               style={[styles.input, { color: theme.text, backgroundColor: theme.backgroundElement }]}
             />
+          </Field>
+
+          <Field label="Tipo">
+            <View style={styles.chips}>
+              {KIND_OPTIONS.map((opt) => {
+                const selected = kind === opt.value;
+                return (
+                  <Pressable
+                    key={opt.value}
+                    onPress={() => setKind(opt.value)}
+                    style={[
+                      styles.chip,
+                      {
+                        backgroundColor: selected
+                          ? theme.backgroundSelected
+                          : theme.backgroundElement,
+                      },
+                    ]}>
+                    <ThemedText type="small" themeColor={selected ? 'text' : 'textSecondary'}>
+                      {opt.label}
+                    </ThemedText>
+                  </Pressable>
+                );
+              })}
+            </View>
           </Field>
 
           {error && (
@@ -122,6 +154,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
     fontSize: 16,
+  },
+  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
+  chip: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.two,
+    borderRadius: Spacing.three,
   },
   saveButton: {
     marginTop: Spacing.two,
