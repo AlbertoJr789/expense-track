@@ -5,15 +5,17 @@ export function parseBrlInput(text: string): number {
 }
 
 /** Máscara BRL a partir dos dígitos digitados (centavos). Ex.: 1234 → 12,34 */
-export function maskBrlInput(text: string): string {
+export function maskBrlInput(text: string, allowNegative = false): string {
+  const negative = allowNegative && /^\s*-/.test(text);
   const digits = text.replace(/\D/g, '');
-  if (!digits) return '';
+  if (!digits) return negative ? '-' : '';
   const cents = Number(digits);
-  if (!Number.isFinite(cents)) return '';
-  return (cents / 100).toLocaleString('pt-BR', {
+  if (!Number.isFinite(cents)) return negative ? '-' : '';
+  const formatted = (cents / 100).toLocaleString('pt-BR', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+  return negative ? `-${formatted}` : formatted;
 }
 
 export function formatBrlMaskFromNumber(value: number): string {

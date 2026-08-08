@@ -6,8 +6,6 @@ import { seedIfEmpty } from '@/db/seed';
 import type {
   Asset,
   AssetInput,
-  AssetMovement,
-  AssetMovementInput,
   AssetSeriesPoint,
   AssetWithBalance,
   Expense,
@@ -67,12 +65,11 @@ type DataContextValue = {
   togglePayment: (expenseChildId: string, paid: boolean) => Promise<void>;
   getMonthSeries: (months?: number) => Promise<MonthSeriesPoint[]>;
   getTransactionSeries: () => Promise<TransactionSeriesResult>;
-  createAsset: (input: AssetInput, firstMovement?: AssetMovementInput) => Promise<void>;
+  createAsset: (input: AssetInput) => Promise<void>;
   updateAsset: (id: string, input: AssetInput) => Promise<void>;
   deleteAsset: (id: string) => Promise<void>;
-  listAssetMovements: (assetId: string) => Promise<AssetMovement[]>;
-  createAssetMovement: (assetId: string, input: AssetMovementInput) => Promise<void>;
-  deleteAssetMovement: (id: string) => Promise<void>;
+  listAssetChildren: (parentId: string) => Promise<Asset[]>;
+  createAssetAporte: (parentId: string, input: AssetInput) => Promise<void>;
   getAssetSeries: () => Promise<AssetSeriesPoint[]>;
   getAssetById: (id: string) => Promise<Asset | null>;
   exportBackup: () => Promise<void>;
@@ -318,11 +315,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const getTransactionSeries = useCallback(async () => repo.getTransactionSeries(), []);
 
   const createAsset = useCallback(
-    async (input: AssetInput, firstMovement?: AssetMovementInput) => {
-      const asset = await repo.createAsset(input);
-      if (firstMovement) {
-        await repo.createAssetMovement(asset.id, firstMovement);
-      }
+    async (input: AssetInput) => {
+      await repo.createAsset(input);
       await refresh();
     },
     [refresh]
@@ -344,21 +338,13 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [refresh]
   );
 
-  const listAssetMovements = useCallback(async (assetId: string) => {
-    return repo.listAssetMovements(assetId);
+  const listAssetChildren = useCallback(async (parentId: string) => {
+    return repo.listAssetChildren(parentId);
   }, []);
 
-  const createAssetMovement = useCallback(
-    async (assetId: string, input: AssetMovementInput) => {
-      await repo.createAssetMovement(assetId, input);
-      await refresh();
-    },
-    [refresh]
-  );
-
-  const deleteAssetMovement = useCallback(
-    async (id: string) => {
-      await repo.deleteAssetMovement(id);
+  const createAssetAporte = useCallback(
+    async (parentId: string, input: AssetInput) => {
+      await repo.createAssetAporte(parentId, input);
       await refresh();
     },
     [refresh]
@@ -409,9 +395,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       createAsset,
       updateAsset,
       deleteAsset,
-      listAssetMovements,
-      createAssetMovement,
-      deleteAssetMovement,
+      listAssetChildren,
+      createAssetAporte,
       getAssetSeries,
       getAssetById,
       exportBackup: handleExportBackup,
@@ -447,9 +432,8 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       createAsset,
       updateAsset,
       deleteAsset,
-      listAssetMovements,
-      createAssetMovement,
-      deleteAssetMovement,
+      listAssetChildren,
+      createAssetAporte,
       getAssetSeries,
       getAssetById,
       handleExportBackup,

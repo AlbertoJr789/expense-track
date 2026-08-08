@@ -169,7 +169,33 @@ export default function ChartsScreen() {
   );
 
   const maxValue = Math.max(1, ...series.flatMap((p) => [p.expenseTotal, p.incomeTotal]));
-  const maxAsset = Math.max(1, ...assetSeries.map((p) => Math.abs(p.total)));
+
+  const assetChartMonths = useMemo(
+    () => assetSeries.map((p) => ({ yearMonth: p.yearMonth, label: p.label })),
+    [assetSeries]
+  );
+
+  const assetChartSeries = useMemo((): TransactionSeries[] => {
+    if (assetSeries.length === 0) return [];
+    const amounts = assetSeries.map((p) => p.total);
+    const present = amounts.filter((a) => a != null);
+    return [
+      {
+        id: 'patrimonio',
+        name: 'Saldo acumulado',
+        groupId: null,
+        amounts,
+        average:
+          present.length > 0 ? present.reduce((sum, a) => sum + a, 0) / present.length : 0,
+        occurrenceCount: present.length,
+      },
+    ];
+  }, [assetSeries]);
+
+  const assetColorById = useMemo(
+    () => ({ patrimonio: theme.income }),
+    [theme.income]
+  );
 
   const currentYm = currentYearMonth();
   const previousYm = addMonths(currentYm, -1);
@@ -448,7 +474,7 @@ export default function ChartsScreen() {
                     <View>
                       <ThemedText type="smallBold">{s.name}</ThemedText>
                       <ThemedText type="small" themeColor="textSecondary">
-                        {s.occurrenceCount} mês{s.occurrenceCount === 1 ? '' : 'es'}
+                        {s.occurrenceCount === 1 ? '1 mês' : `${s.occurrenceCount} meses`}
                         {viewMode === 'group'
                           ? ` · ${selectedSeries.filter((t) => (t.groupId ?? '__none__') === (s.groupId ?? '__none__')).length} tx`
                           : ''}
@@ -467,7 +493,7 @@ export default function ChartsScreen() {
         {tab === 'assets' && (
           <>
             <ThemedText themeColor="textSecondary">
-              Progressão do patrimônio a partir das movimentações (compras, aportes, vendas…)
+              Progressão do patrimônio (valor inicial + aportes)
             </ThemedText>
 
             <View style={[styles.reserveCard, { backgroundColor: theme.backgroundElement }]}>
@@ -486,43 +512,18 @@ export default function ChartsScreen() {
 
             {assetSeries.length === 0 ? (
               <ThemedText themeColor="textSecondary" style={{ marginTop: Spacing.four }}>
-                Cadastre patrimônios e movimentações em Lançamentos → Patrimônio.
+                Cadastre patrimônios e aportes em Lançamentos → Patrimônio.
               </ThemedText>
             ) : (
               <>
-                <View style={[styles.legend, { marginTop: Spacing.three }]}>
-                  <LegendDot color={theme.income} label="Saldo acumulado" />
+                <View style={{ marginTop: Spacing.three }}>
+                  <CartesianLineChart
+                    months={assetChartMonths}
+                    series={assetChartSeries}
+                    colorById={assetColorById}
+                    height={240}
+                  />
                 </View>
-
-                <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                  <View style={styles.chartRow}>
-                    {assetSeries.map((point) => {
-                      const h = (Math.abs(point.total) / maxAsset) * CHART_HEIGHT;
-                      return (
-                        <View key={point.yearMonth} style={styles.barGroup}>
-                          <View style={styles.bars}>
-                            <View
-                              style={[
-                                styles.barWide,
-                                {
-                                  height: Math.max(2, h),
-                                  backgroundColor:
-                                    point.total >= 0 ? theme.income : theme.expense,
-                                },
-                              ]}
-                            />
-                          </View>
-                          <ThemedText
-                            type="small"
-                            themeColor="textSecondary"
-                            style={styles.barLabel}>
-                            {point.label}
-                          </ThemedText>
-                        </View>
-                      );
-                    })}
-                  </View>
-                </ScrollView>
 
                 <ThemedText type="smallBold" style={styles.section}>
                   Detalhamento mensal

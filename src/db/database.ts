@@ -62,8 +62,12 @@ CREATE TABLE IF NOT EXISTS expense_child_skips (
 CREATE TABLE IF NOT EXISTS assets (
   id TEXT PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
-  type TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT '',
   notes TEXT,
+  amount REAL NOT NULL DEFAULT 0,
+  date TEXT,
+  year_month TEXT,
+  parent_id TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL
 );
@@ -129,12 +133,30 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
     CREATE TABLE IF NOT EXISTS assets (
       id TEXT PRIMARY KEY NOT NULL,
       name TEXT NOT NULL,
-      type TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT '',
       notes TEXT,
+      amount REAL NOT NULL DEFAULT 0,
+      date TEXT,
+      year_month TEXT,
+      parent_id TEXT,
       active INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL
     )
   `);
+
+  const assetCols = await tableColumns(db, 'assets');
+  if (!assetCols.has('amount')) {
+    await db.execAsync('ALTER TABLE assets ADD COLUMN amount REAL NOT NULL DEFAULT 0');
+  }
+  if (!assetCols.has('date')) {
+    await db.execAsync('ALTER TABLE assets ADD COLUMN date TEXT');
+  }
+  if (!assetCols.has('year_month')) {
+    await db.execAsync('ALTER TABLE assets ADD COLUMN year_month TEXT');
+  }
+  if (!assetCols.has('parent_id')) {
+    await db.execAsync('ALTER TABLE assets ADD COLUMN parent_id TEXT');
+  }
 
   await db.execAsync(`
     CREATE TABLE IF NOT EXISTS asset_movements (
@@ -148,6 +170,47 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       created_at TEXT NOT NULL
     )
   `);
+
+  // Migra movimentações antigas para patrimônios filhos (uma vez).
+  const movementCount = await db.getFirstAsync<{ c: number }>(
+    'SELECT COUNT(*) AS c FROM asset_movements'
+  );
+  if ((movementCount?.c ?? 0) > 0) {
+    const moves = await db.getAllAsync<{
+      id: string;
+      asset_id: string;
+      kind: string;
+      amount: number;
+      date: string;
+      year_month: string;
+      created_at: string;
+    }>('SELECT * FROM asset_movements ORDER BY date ASC');
+    for (const m of moves) {
+      const signed =
+        m.kind === 'sell' || m.kind === 'withdrawal' ? -Math.abs(m.amount) : Math.abs(m.amount);
+      if (signed <= 0) continue;
+      await db.runAsync(
+        `INSERT INTO assets
+          (id, name, type, notes, amount, date, year_month, parent_id, active, created_at)
+         VALUES (?, ?, '', ?, ?, ?, ?, ?, 1, ?)`,
+        [
+          createIdForMigrate(),
+          `Aporte`,
+          null,
+          signed,
+          m.date,
+          m.year_month,
+          m.asset_id,
+          m.created_at,
+        ]
+      );
+    }
+    await db.execAsync('DELETE FROM asset_movements');
+  }
+}
+
+function createIdForMigrate(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {

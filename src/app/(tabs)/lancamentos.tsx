@@ -13,12 +13,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useFocusEffect } from 'expo-router';
 
-import {
-  AssetFormModal,
-  AssetMovementFormModal,
-  assetTypeLabel,
-  movementKindLabel,
-} from '@/components/asset-form-modal';
+import { AssetFormModal } from '@/components/asset-form-modal';
 import { GroupFormModal } from '@/components/group-form-modal';
 import { ItemFormModal } from '@/components/item-form-modal';
 import { SwipeRow } from '@/components/swipe-row';
@@ -27,9 +22,8 @@ import { ThemedView } from '@/components/themed-view';
 import { BottomTabInset, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useData } from '@/data/DataProvider';
 import type {
+  Asset,
   AssetInput,
-  AssetMovement,
-  AssetMovementInput,
   AssetWithBalance,
   Expense,
   ExpenseInput,
@@ -40,7 +34,7 @@ import type {
   MonthIncomeRow,
   RecurringItem,
 } from '@/data/types';
-import { formatDateInput } from '@/domain/format';
+import { formatDateInput, todayIso } from '@/domain/format';
 import {
   addMonths,
   currentYearMonth,
@@ -48,7 +42,7 @@ import {
   recurrenceLabel,
   yearMonthLabel,
 } from '@/domain/recurrence';
-import { movementSignedAmount, suggestNextChildMonth } from '@/db/repository';
+import { suggestNextChildMonth } from '@/db/repository';
 import { useTheme } from '@/hooks/use-theme';
 
 type Segment = 'expenses' | 'incomes' | 'groups' | 'assets';
@@ -540,14 +534,14 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
                 onPress={handleGenerateRecurrences}
                 disabled={generating}
                 style={[
-                  styles.groupChip,
+                  styles.generateChip,
                   {
-                    backgroundColor: theme.backgroundElement,
+                    backgroundColor: theme.income,
                     opacity: generating ? 0.6 : 1,
                   },
                 ]}>
-                <ThemedText type="small" themeColor="textSecondary">
-                  {generating ? 'Gerando…' : 'Gerar recorrências'}
+                <ThemedText type="small" style={styles.generateChipText}>
+                  {generating ? 'Gerando…' : '+ Gerar recorrências'}
                 </ThemedText>
               </Pressable>
             )}
@@ -909,16 +903,22 @@ function AssetsSection({ createRef }: { createRef: CreateRef }) {
     createAsset,
     updateAsset,
     deleteAsset,
-    listAssetMovements,
-    createAssetMovement,
-    deleteAssetMovement,
+    listAssetChildren,
+    createAssetAporte,
   } = useData();
+  const [month, setMonth] = useState(currentYearMonth());
   const [query, setQuery] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
-  const [editing, setEditing] = useState<AssetWithBalance | null>(null);
+  const [editing, setEditing] = useState<Asset | AssetWithBalance | null>(null);
   const [detailAsset, setDetailAsset] = useState<AssetWithBalance | null>(null);
-  const [movements, setMovements] = useState<AssetMovement[]>([]);
-  const [movementModalOpen, setMovementModalOpen] = useState(false);
+  const [children, setChildren] = useState<Asset[]>([]);
+  const [aporteModalOpen, setAporteModalOpen] = useState(false);
+
+  const defaultDateForMonth = useMemo(() => {
+    const current = currentYearMonth();
+    if (month === current) return todayIso();
+    return `${month}-01`;
+  }, [month]);
 
   useEffect(() => {
     if (!detailAsset) return;
@@ -948,33 +948,45 @@ function AssetsSection({ createRef }: { createRef: CreateRef }) {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    let list = assets;
+    let list = assets.filter(
+      (a) => a.yearMonth === month || a.aporteMonths.includes(month)
+    );
     if (q) list = list.filter((a) => a.name.toLowerCase().includes(q));
     if (pending) list = list.filter((a) => a.id !== pending.id);
     return list;
-  }, [assets, query, pending]);
+  }, [assets, query, pending, month]);
+
+  const visibleChildren = useMemo(
+    () => children.filter((c) => c.yearMonth === month),
+    [children, month]
+  );
 
   async function openDetail(asset: AssetWithBalance) {
     setDetailAsset(asset);
-    setMovements(await listAssetMovements(asset.id));
+    setChildren(await listAssetChildren(asset.id));
   }
 
-  async function refreshMovements(assetId: string) {
-    setMovements(await listAssetMovements(assetId));
+  async function refreshChildren(assetId: string) {
+    setChildren(await listAssetChildren(assetId));
   }
 
-  async function handleSaveAsset(input: AssetInput, firstMovement?: AssetMovementInput) {
+  async function handleSaveAsset(input: AssetInput) {
     if (editing) {
       await updateAsset(editing.id, input);
+      if (detailAsset && editing.id === detailAsset.id) {
+        await refreshChildren(detailAsset.id);
+      } else if (detailAsset && editing.parentId === detailAsset.id) {
+        await refreshChildren(detailAsset.id);
+      }
     } else {
-      await createAsset(input, firstMovement);
+      await createAsset(input);
     }
   }
 
-  async function handleSaveMovement(input: AssetMovementInput) {
+  async function handleSaveAporte(input: AssetInput) {
     if (!detailAsset) return;
-    await createAssetMovement(detailAsset.id, input);
-    await refreshMovements(detailAsset.id);
+    await createAssetAporte(detailAsset.id, input);
+    await refreshChildren(detailAsset.id);
   }
 
   if (detailAsset) {
@@ -988,6 +1000,11 @@ function AssetsSection({ createRef }: { createRef: CreateRef }) {
             <Ionicons name="chevron-back" size={20} color={theme.text} />
             <ThemedText type="smallBold">{detailAsset.name}</ThemedText>
           </Pressable>
+          <View style={styles.filterRow}>
+            <View style={styles.monthColFull}>
+              <MonthNav month={month} onChange={setMonth} />
+            </View>
+          </View>
           <View style={styles.detailActions}>
             <Pressable
               onPress={() => {
@@ -998,51 +1015,69 @@ function AssetsSection({ createRef }: { createRef: CreateRef }) {
               <Ionicons name="create-outline" size={18} color={theme.text} />
             </Pressable>
             <Pressable
-              onPress={() => setMovementModalOpen(true)}
+              onPress={() => setAporteModalOpen(true)}
               style={[styles.addButton, { backgroundColor: theme.accent }]}>
-              <ThemedText style={styles.addLabel}>+ Movimento</ThemedText>
+              <ThemedText style={styles.addLabel}>+ Aporte</ThemedText>
             </Pressable>
           </View>
           <ThemedText type="small" themeColor="textSecondary">
-            {assetTypeLabel(detailAsset.type)} · Saldo {formatBrl(detailAsset.balance)}
+            Valor inicial {formatBrl(detailAsset.amount)} · {formatDateInput(detailAsset.date)}
           </ThemedText>
+          <ThemedText
+            type="smallBold"
+            style={{ color: detailAsset.balance >= 0 ? theme.income : theme.expense }}>
+            Saldo {formatBrl(detailAsset.balance)}
+          </ThemedText>
+          {detailAsset.notes ? (
+            <ThemedText type="small" themeColor="textSecondary">
+              {detailAsset.notes}
+            </ThemedText>
+          ) : null}
         </View>
 
         <FlatList
-          data={movements}
+          data={visibleChildren}
           keyExtractor={(item) => item.id}
           contentContainerStyle={[
             styles.list,
             { paddingBottom: BottomTabInset + insets.bottom + Spacing.six },
           ]}
-          ListEmptyComponent={
-            <ThemedText themeColor="textSecondary" style={styles.empty}>
-              Nenhuma movimentação ainda.
+          ListHeaderComponent={
+            <ThemedText type="smallBold" style={{ marginBottom: Spacing.two }}>
+              Aportes em {yearMonthLabel(month)}
             </ThemedText>
           }
-          renderItem={({ item }) => {
-            const signed = movementSignedAmount(item.kind, item.amount);
-            return (
-              <SwipeRow
-                onDelete={() => {
-                  deleteAssetMovement(item.id)
-                    .then(() => refreshMovements(detailAsset.id))
-                    .catch(console.error);
-                }}>
-                <View style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
-                  <View style={styles.rowMain}>
-                    <ThemedText type="smallBold">{movementKindLabel(item.kind)}</ThemedText>
-                    <ThemedText type="small" themeColor="textSecondary">
-                      {formatDateInput(item.date)}
-                    </ThemedText>
-                  </View>
-                  <ThemedText style={{ color: signed >= 0 ? theme.income : theme.expense }}>
-                    {formatBrl(signed)}
+          ListEmptyComponent={
+            <ThemedText themeColor="textSecondary" style={styles.empty}>
+              Nenhum aporte em {yearMonthLabel(month)}.
+            </ThemedText>
+          }
+          renderItem={({ item }) => (
+            <SwipeRow
+              onDelete={() => {
+                deleteAsset(item.id)
+                  .then(() => refreshChildren(detailAsset.id))
+                  .catch(console.error);
+              }}>
+              <Pressable
+                onPress={() => {
+                  setEditing(item);
+                  setModalOpen(true);
+                }}
+                style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
+                <View style={styles.rowMain}>
+                  <ThemedText type="smallBold">{item.name}</ThemedText>
+                  <ThemedText type="small" themeColor="textSecondary">
+                    {formatDateInput(item.date)}
+                    {item.notes ? ` · ${item.notes}` : ''}
                   </ThemedText>
                 </View>
-              </SwipeRow>
-            );
-          }}
+                <ThemedText style={{ color: item.amount >= 0 ? theme.income : theme.expense }}>
+                  {formatBrl(item.amount)}
+                </ThemedText>
+              </Pressable>
+            </SwipeRow>
+          )}
         />
 
         <AssetFormModal
@@ -1055,10 +1090,12 @@ function AssetsSection({ createRef }: { createRef: CreateRef }) {
           }}
           onSave={handleSaveAsset}
         />
-        <AssetMovementFormModal
-          visible={movementModalOpen}
-          onClose={() => setMovementModalOpen(false)}
-          onSave={handleSaveMovement}
+        <AssetFormModal
+          visible={aporteModalOpen}
+          title="Novo aporte"
+          defaultDate={defaultDateForMonth}
+          onClose={() => setAporteModalOpen(false)}
+          onSave={handleSaveAporte}
         />
       </>
     );
@@ -1067,7 +1104,14 @@ function AssetsSection({ createRef }: { createRef: CreateRef }) {
   return (
     <>
       <View style={styles.controls}>
-        <SearchInput value={query} onChange={setQuery} />
+        <View style={styles.filterRow}>
+          <View style={styles.searchCol}>
+            <SearchInput value={query} onChange={setQuery} />
+          </View>
+          <View style={styles.monthCol}>
+            <MonthNav month={month} onChange={setMonth} />
+          </View>
+        </View>
       </View>
 
       <FlatList
@@ -1079,7 +1123,9 @@ function AssetsSection({ createRef }: { createRef: CreateRef }) {
         ]}
         ListEmptyComponent={
           <ThemedText themeColor="textSecondary" style={styles.empty}>
-            {query.trim() ? 'Nenhum resultado.' : 'Nenhum patrimônio cadastrado.'}
+            {query.trim()
+              ? 'Nenhum resultado.'
+              : `Nenhum patrimônio em ${yearMonthLabel(month)}.`}
           </ThemedText>
         }
         renderItem={({ item }) => (
@@ -1090,7 +1136,10 @@ function AssetsSection({ createRef }: { createRef: CreateRef }) {
               <View style={styles.rowMain}>
                 <ThemedText type="smallBold">{item.name}</ThemedText>
                 <ThemedText type="small" themeColor="textSecondary">
-                  {assetTypeLabel(item.type)}
+                  {formatDateInput(item.date)}
+                  {item.childrenCount > 0
+                    ? ` · ${item.childrenCount} aporte${item.childrenCount === 1 ? '' : 's'}`
+                    : ''}
                 </ThemedText>
               </View>
               <ThemedText style={{ color: item.balance >= 0 ? theme.income : theme.expense }}>
@@ -1111,7 +1160,7 @@ function AssetsSection({ createRef }: { createRef: CreateRef }) {
         visible={modalOpen}
         title={editing ? 'Editar patrimônio' : 'Novo patrimônio'}
         initial={editing}
-        requireFirstMovement={!editing}
+        defaultDate={defaultDateForMonth}
         onClose={() => {
           setModalOpen(false);
           setEditing(null);
@@ -1164,6 +1213,7 @@ const styles = StyleSheet.create({
   },
   searchCol: { flex: 8 },
   monthCol: { flex: 4 },
+  monthColFull: { flex: 1 },
   search: {
     width: '100%',
     height: 44,
@@ -1244,6 +1294,12 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.one,
     borderRadius: Spacing.three,
   },
+  generateChip: {
+    paddingHorizontal: Spacing.three,
+    paddingVertical: Spacing.one,
+    borderRadius: Spacing.three,
+  },
+  generateChipText: { color: '#fff', fontWeight: '700' },
   groupChipClear: {
     paddingHorizontal: Spacing.two,
     paddingVertical: Spacing.one,

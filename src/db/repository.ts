@@ -2,11 +2,7 @@ import { getDatabase } from '@/db/database';
 import type {
   Asset,
   AssetInput,
-  AssetMovement,
-  AssetMovementInput,
-  AssetMovementKind,
   AssetSeriesPoint,
-  AssetType,
   AssetWithBalance,
   BackupPayload,
   Expense,
@@ -70,19 +66,12 @@ type PaymentRow = {
 type AssetRow = {
   id: string;
   name: string;
-  type: string;
   notes: string | null;
+  amount: number | null;
+  date: string | null;
+  year_month: string | null;
+  parent_id: string | null;
   active: number;
-  created_at: string;
-};
-type AssetMovementRow = {
-  id: string;
-  asset_id: string;
-  kind: string;
-  amount: number;
-  quantity: number | null;
-  date: string;
-  year_month: string;
   created_at: string;
 };
 
@@ -148,51 +137,19 @@ function mapPayment(row: PaymentRow): Payment {
   };
 }
 
-function mapAssetType(value: string): AssetType {
-  if (value === 'rdb' || value === 'treasury') return value;
-  return 'stock';
-}
-
-function mapMovementKind(value: string): AssetMovementKind {
-  if (
-    value === 'sell' ||
-    value === 'contribution' ||
-    value === 'withdrawal' ||
-    value === 'yield'
-  ) {
-    return value;
-  }
-  return 'buy';
-}
-
 function mapAsset(row: AssetRow): Asset {
+  const date = row.date || row.created_at.slice(0, 10);
   return {
     id: row.id,
     name: row.name,
-    type: mapAssetType(row.type),
     notes: row.notes,
+    amount: row.amount ?? 0,
+    date,
+    yearMonth: row.year_month || date.slice(0, 7),
+    parentId: row.parent_id,
     active: row.active === 1,
     createdAt: row.created_at,
   };
-}
-
-function mapAssetMovement(row: AssetMovementRow): AssetMovement {
-  return {
-    id: row.id,
-    assetId: row.asset_id,
-    kind: mapMovementKind(row.kind),
-    amount: row.amount,
-    quantity: row.quantity,
-    date: row.date,
-    yearMonth: row.year_month,
-    createdAt: row.created_at,
-  };
-}
-
-/** Sinal da movimentação no saldo (+ compra/aporte/rendimento, − venda/resgate). */
-export function movementSignedAmount(kind: AssetMovementKind, amount: number): number {
-  if (kind === 'sell' || kind === 'withdrawal') return -Math.abs(amount);
-  return Math.abs(amount);
 }
 
 export async function listGroups(): Promise<Group[]> {
@@ -872,21 +829,24 @@ export async function unmarkExpensePaid(expenseId: string, yearMonth: string): P
 
 // —— Patrimônio ——
 
+/** Lista patrimônios raiz (sem pai), com saldo = valor próprio + aportes filhos. */
 export async function listAssets(): Promise<AssetWithBalance[]> {
-  const db = await getDatabase();
-  const assets = (await db.getAllAsync<AssetRow>('SELECT * FROM assets ORDER BY name COLLATE NOCASE')).map(
-    mapAsset
-  );
-  const movements = await listAllAssetMovements();
-  const balanceByAsset = new Map<string, number>();
-  for (const m of movements) {
-    const prev = balanceByAsset.get(m.assetId) ?? 0;
-    balanceByAsset.set(m.assetId, prev + movementSignedAmount(m.kind, m.amount));
-  }
-  return assets.map((a) => ({
-    ...a,
-    balance: balanceByAsset.get(a.id) ?? 0,
-  }));
+  const all = await listAllAssets();
+  const roots = all.filter((a) => !a.parentId);
+  const children = all.filter((a) => a.parentId);
+  return roots
+    .map((root) => {
+      const kids = children.filter((c) => c.parentId === root.id);
+      const kidsTotal = kids.reduce((sum, c) => sum + c.amount, 0);
+      const aporteMonths = [...new Set(kids.map((c) => c.yearMonth))].sort();
+      return {
+        ...root,
+        balance: root.amount + kidsTotal,
+        childrenCount: kids.length,
+        aporteMonths,
+      };
+    })
+    .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
 }
 
 export async function getAssetById(id: string): Promise<Asset | null> {
@@ -895,114 +855,102 @@ export async function getAssetById(id: string): Promise<Asset | null> {
   return row ? mapAsset(row) : null;
 }
 
-export async function createAsset(input: AssetInput): Promise<Asset> {
+export async function listAssetChildren(parentId: string): Promise<Asset[]> {
   const db = await getDatabase();
+  const rows = await db.getAllAsync<AssetRow>(
+    `SELECT * FROM assets WHERE parent_id = ? ORDER BY date DESC, created_at DESC`,
+    [parentId]
+  );
+  return rows.map(mapAsset);
+}
+
+export async function createAsset(input: AssetInput, parentId: string | null = null): Promise<Asset> {
+  const db = await getDatabase();
+  const yearMonth = input.date.slice(0, 7);
   const asset: Asset = {
     id: createId(),
     name: input.name.trim(),
-    type: input.type,
     notes: input.notes?.trim() || null,
-    active: input.active,
+    amount: input.amount,
+    date: input.date,
+    yearMonth,
+    parentId,
+    active: true,
     createdAt: new Date().toISOString(),
   };
   await db.runAsync(
-    `INSERT INTO assets (id, name, type, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-    [asset.id, asset.name, asset.type, asset.notes, asset.active ? 1 : 0, asset.createdAt]
+    `INSERT INTO assets
+      (id, name, type, notes, amount, date, year_month, parent_id, active, created_at)
+     VALUES (?, ?, '', ?, ?, ?, ?, ?, 1, ?)`,
+    [
+      asset.id,
+      asset.name,
+      asset.notes,
+      asset.amount,
+      asset.date,
+      asset.yearMonth,
+      asset.parentId,
+      asset.createdAt,
+    ]
   );
   return asset;
 }
 
+/** Cria um patrimônio filho (aporte) sob o pai. */
+export async function createAssetAporte(parentId: string, input: AssetInput): Promise<Asset> {
+  const parent = await getAssetById(parentId);
+  if (!parent || parent.parentId) {
+    throw new Error('Patrimônio pai inválido');
+  }
+  return createAsset(input, parentId);
+}
+
 export async function updateAsset(id: string, input: AssetInput): Promise<void> {
   const db = await getDatabase();
+  const yearMonth = input.date.slice(0, 7);
   await db.runAsync(
-    `UPDATE assets SET name = ?, type = ?, notes = ?, active = ? WHERE id = ?`,
-    [input.name.trim(), input.type, input.notes?.trim() || null, input.active ? 1 : 0, id]
+    `UPDATE assets SET name = ?, notes = ?, amount = ?, date = ?, year_month = ? WHERE id = ?`,
+    [
+      input.name.trim(),
+      input.notes?.trim() || null,
+      input.amount,
+      input.date,
+      yearMonth,
+      id,
+    ]
   );
 }
 
 export async function deleteAsset(id: string): Promise<void> {
   const db = await getDatabase();
-  await db.runAsync('DELETE FROM asset_movements WHERE asset_id = ?', [id]);
+  // Remove filhos primeiro.
+  await db.runAsync('DELETE FROM assets WHERE parent_id = ?', [id]);
   await db.runAsync('DELETE FROM assets WHERE id = ?', [id]);
-}
-
-export async function listAssetMovements(assetId: string): Promise<AssetMovement[]> {
-  const db = await getDatabase();
-  const rows = await db.getAllAsync<AssetMovementRow>(
-    `SELECT * FROM asset_movements WHERE asset_id = ? ORDER BY date DESC, created_at DESC`,
-    [assetId]
-  );
-  return rows.map(mapAssetMovement);
-}
-
-async function listAllAssetMovements(): Promise<AssetMovement[]> {
-  const db = await getDatabase();
-  const rows = await db.getAllAsync<AssetMovementRow>(
-    `SELECT * FROM asset_movements ORDER BY date ASC, created_at ASC`
-  );
-  return rows.map(mapAssetMovement);
 }
 
 async function listAllAssets(): Promise<Asset[]> {
   const db = await getDatabase();
-  const rows = await db.getAllAsync<AssetRow>('SELECT * FROM assets ORDER BY name COLLATE NOCASE');
+  const rows = await db.getAllAsync<AssetRow>(
+    'SELECT * FROM assets ORDER BY date ASC, created_at ASC'
+  );
   return rows.map(mapAsset);
 }
 
-export async function createAssetMovement(
-  assetId: string,
-  input: AssetMovementInput
-): Promise<AssetMovement> {
-  const db = await getDatabase();
-  const yearMonth = input.date.slice(0, 7);
-  const movement: AssetMovement = {
-    id: createId(),
-    assetId,
-    kind: input.kind,
-    amount: Math.abs(input.amount),
-    quantity: input.quantity,
-    date: input.date,
-    yearMonth,
-    createdAt: new Date().toISOString(),
-  };
-  await db.runAsync(
-    `INSERT INTO asset_movements
-      (id, asset_id, kind, amount, quantity, date, year_month, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      movement.id,
-      movement.assetId,
-      movement.kind,
-      movement.amount,
-      movement.quantity,
-      movement.date,
-      movement.yearMonth,
-      movement.createdAt,
-    ]
-  );
-  return movement;
-}
-
-export async function deleteAssetMovement(id: string): Promise<void> {
-  const db = await getDatabase();
-  await db.runAsync('DELETE FROM asset_movements WHERE id = ?', [id]);
-}
-
-/** Série de saldo acumulado do patrimônio por mês. */
+/** Série de saldo acumulado do patrimônio por mês (pais + filhos). */
 export async function getAssetSeries(): Promise<AssetSeriesPoint[]> {
-  const movements = await listAllAssetMovements();
-  if (movements.length === 0) return [];
+  const all = await listAllAssets();
+  if (all.length === 0) return [];
 
-  const earliest = movements[0].yearMonth;
-  const latest = movements[movements.length - 1].yearMonth;
+  const sorted = [...all].sort((a, b) => a.date.localeCompare(b.date));
+  const earliest = sorted[0].yearMonth;
+  const latest = sorted[sorted.length - 1].yearMonth;
   const current = currentYearMonth();
   const end = latest > current ? latest : current;
   const months = yearMonthsRange(earliest, end);
 
   const byMonth = new Map<string, number>();
-  for (const m of movements) {
-    const signed = movementSignedAmount(m.kind, m.amount);
-    byMonth.set(m.yearMonth, (byMonth.get(m.yearMonth) ?? 0) + signed);
+  for (const a of all) {
+    byMonth.set(a.yearMonth, (byMonth.get(a.yearMonth) ?? 0) + a.amount);
   }
 
   let running = 0;
@@ -1035,14 +983,13 @@ async function listAllPayments(): Promise<Payment[]> {
 }
 
 export async function exportBackupData(): Promise<BackupPayload> {
-  const [groups, expenses, incomes, skips, payments, assets, assetMovements] = await Promise.all([
+  const [groups, expenses, incomes, skips, payments, assets] = await Promise.all([
     listGroups(),
     listAllExpenses(),
     listIncomes(),
     listAllSkips(),
     listAllPayments(),
     listAllAssets(),
-    listAllAssetMovements(),
   ]);
   return {
     version: 2,
@@ -1053,7 +1000,6 @@ export async function exportBackupData(): Promise<BackupPayload> {
     skips,
     payments,
     assets,
-    assetMovements,
   };
 }
 
@@ -1087,8 +1033,23 @@ function assertBackupPayload(raw: unknown): BackupPayload {
     incomes: data.incomes,
     skips: data.skips,
     payments: Array.isArray(data.payments) ? data.payments : [],
-    assets: Array.isArray(data.assets) ? data.assets : [],
-    assetMovements: Array.isArray(data.assetMovements) ? data.assetMovements : [],
+    assets: Array.isArray(data.assets)
+      ? data.assets.map((a) => {
+          const raw = a as Asset & { type?: string };
+          const date = raw.date || raw.createdAt?.slice(0, 10) || new Date().toISOString().slice(0, 10);
+          return {
+            id: raw.id,
+            name: raw.name,
+            notes: raw.notes ?? null,
+            amount: typeof raw.amount === 'number' ? raw.amount : 0,
+            date,
+            yearMonth: raw.yearMonth || date.slice(0, 7),
+            parentId: raw.parentId ?? null,
+            active: raw.active !== false,
+            createdAt: raw.createdAt,
+          };
+        })
+      : [],
   };
 }
 
@@ -1185,17 +1146,20 @@ export async function importBackupData(raw: unknown): Promise<void> {
 
     for (const a of backup.assets) {
       await db.runAsync(
-        `INSERT INTO assets (id, name, type, notes, active, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
-        [a.id, a.name, a.type, a.notes, a.active ? 1 : 0, a.createdAt]
-      );
-    }
-
-    for (const m of backup.assetMovements) {
-      await db.runAsync(
-        `INSERT INTO asset_movements
-          (id, asset_id, kind, amount, quantity, date, year_month, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [m.id, m.assetId, m.kind, m.amount, m.quantity, m.date, m.yearMonth, m.createdAt]
+        `INSERT INTO assets
+          (id, name, type, notes, amount, date, year_month, parent_id, active, created_at)
+         VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          a.id,
+          a.name,
+          a.notes,
+          a.amount,
+          a.date,
+          a.yearMonth,
+          a.parentId,
+          a.active ? 1 : 0,
+          a.createdAt,
+        ]
       );
     }
   });

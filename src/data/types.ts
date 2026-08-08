@@ -103,51 +103,30 @@ export type ExpenseChildSkip = {
   createdAt: string;
 };
 
-export type AssetType = 'stock' | 'rdb' | 'treasury';
-
-export type AssetMovementKind =
-  | 'buy'
-  | 'sell'
-  | 'contribution'
-  | 'withdrawal'
-  | 'yield';
-
 export type Asset = {
   id: string;
   name: string;
-  type: AssetType;
   notes: string | null;
-  active: boolean;
-  createdAt: string;
-};
-
-export type AssetMovement = {
-  id: string;
-  assetId: string;
-  kind: AssetMovementKind;
   amount: number;
-  quantity: number | null;
   date: string;
   yearMonth: string;
+  parentId: string | null;
+  active: boolean;
   createdAt: string;
 };
 
 export type AssetInput = {
   name: string;
-  type: AssetType;
   notes: string | null;
-  active: boolean;
-};
-
-export type AssetMovementInput = {
-  kind: AssetMovementKind;
   amount: number;
-  quantity: number | null;
   date: string;
 };
 
 export type AssetWithBalance = Asset & {
   balance: number;
+  childrenCount: number;
+  /** Meses em que há aportes filhos (YYYY-MM). */
+  aporteMonths: string[];
 };
 
 export type AssetSeriesPoint = {
@@ -166,5 +145,6 @@ export type BackupPayload = {
   skips: ExpenseChildSkip[];
   payments: Payment[];
   assets: Asset[];
-  assetMovements: AssetMovement[];
+  /** @deprecated Mantido só para import de backups antigos. */
+  assetMovements?: unknown[];
 };
