@@ -1,18 +1,24 @@
 import { getDatabase } from '@/db/database';
 import type {
   Asset,
+  AssetClassification,
   AssetInput,
   AssetSeriesPoint,
   AssetWithBalance,
   BackupPayload,
+  BankAccount,
   Expense,
+  ExpenseChildPatch,
   ExpenseChildSkip,
   ExpenseInput,
+  Goal,
   Group,
   GroupKind,
   Income,
   IncomeInput,
+  LifestyleItem,
   Payment,
+  PaymentMethod,
   TransactionSeries,
   TransactionSeriesResult,
 } from '@/data/types';
@@ -21,13 +27,24 @@ import {
   clampDueDay,
   createId,
   currentYearMonth,
+  defaultIncludeInLivingCost,
   isActiveInMonth,
   monthBounds,
   yearMonthLabel,
   yearMonthsRange,
 } from '@/domain/recurrence';
+import { valueAsOf } from '@/domain/balance';
+import { parseDateInput } from '@/domain/format';
+import { __ } from '@/i18n/translate';
+import * as catalog from '@/db/catalog';
 
-type GroupRow = { id: string; name: string; kind: string; created_at: string };
+type GroupRow = {
+  id: string;
+  name: string;
+  kind: string;
+  parent_id?: string | null;
+  created_at: string;
+};
 type ExpenseRow = {
   id: string;
   name: string;
@@ -37,6 +54,9 @@ type ExpenseRow = {
   start_date: string;
   end_date: string | null;
   group_id: string | null;
+  payment_method_id?: string | null;
+  bank_account_id?: string | null;
+  include_in_living_cost?: number | null;
   active: number;
   created_at: string;
   parent_id: string | null;
@@ -54,6 +74,8 @@ type IncomeRow = {
   start_date: string;
   end_date: string | null;
   group_id: string | null;
+  payment_method_id?: string | null;
+  bank_account_id?: string | null;
   active: number;
   created_at: string;
 };
@@ -73,6 +95,11 @@ type AssetRow = {
   parent_id: string | null;
   active: number;
   created_at: string;
+  classification?: string | null;
+  generates_income?: number | null;
+  installment?: number | null;
+  cet_annual?: number | null;
+  counts_as_debt?: number | null;
 };
 
 function mapRecurrence(value: string | null): Expense['recurrence'] {
@@ -82,6 +109,13 @@ function mapRecurrence(value: string | null): Expense['recurrence'] {
 
 function mapGroupKind(value: string | null | undefined): GroupKind {
   return value === 'income' ? 'income' : 'expense';
+}
+
+function mapClassification(value: string | null | undefined): AssetClassification {
+  if (value === 'short_term' || value === 'long_term' || value === 'good' || value === 'liability') {
+    return value;
+  }
+  return 'good';
 }
 
 function mapExpense(row: ExpenseRow): Expense {
@@ -94,6 +128,8 @@ function mapExpense(row: ExpenseRow): Expense {
     startDate: row.start_date,
     endDate: row.end_date,
     groupId: row.group_id,
+    paymentMethodId: row.payment_method_id ?? null,
+    bankAccountId: row.bank_account_id ?? null,
     active: row.active === 1,
     createdAt: row.created_at,
     parentId: row.parent_id,
@@ -101,6 +137,7 @@ function mapExpense(row: ExpenseRow): Expense {
     paid: row.paid === 1,
     paidAt: row.paid_at,
     excluded: (row.excluded ?? 0) === 1,
+    includeInLivingCost: (row.include_in_living_cost ?? 0) === 1,
   };
 }
 
@@ -114,6 +151,8 @@ function mapIncome(row: IncomeRow): Income {
     startDate: row.start_date,
     endDate: row.end_date,
     groupId: row.group_id,
+    paymentMethodId: row.payment_method_id ?? null,
+    bankAccountId: row.bank_account_id ?? null,
     active: row.active === 1,
     createdAt: row.created_at,
   };
@@ -124,6 +163,7 @@ function mapGroup(row: GroupRow): Group {
     id: row.id,
     name: row.name,
     kind: mapGroupKind(row.kind),
+    parentId: row.parent_id ?? null,
     createdAt: row.created_at,
   };
 }
@@ -137,6 +177,17 @@ function mapPayment(row: PaymentRow): Payment {
   };
 }
 
+function canonicalYearMonth(yearMonth: string | null | undefined, date: string): string {
+  for (const candidate of [yearMonth, date]) {
+    const trimmed = candidate?.trim();
+    if (!trimmed) continue;
+    if (/^\d{4}-\d{2}/.test(trimmed)) return trimmed.slice(0, 7);
+    const parsed = parseDateInput(trimmed);
+    if (parsed) return parsed.slice(0, 7);
+  }
+  return date.slice(0, 7);
+}
+
 function mapAsset(row: AssetRow): Asset {
   const date = row.date || row.created_at.slice(0, 10);
   return {
@@ -145,10 +196,15 @@ function mapAsset(row: AssetRow): Asset {
     notes: row.notes,
     amount: row.amount ?? 0,
     date,
-    yearMonth: row.year_month || date.slice(0, 7),
+    yearMonth: canonicalYearMonth(row.year_month, date),
     parentId: row.parent_id,
     active: row.active === 1,
     createdAt: row.created_at,
+    classification: mapClassification(row.classification),
+    generatesIncome: (row.generates_income ?? 0) === 1,
+    installment: row.installment ?? null,
+    cetAnnual: row.cet_annual ?? null,
+    countsAsDebt: (row.counts_as_debt ?? 0) === 1,
   };
 }
 
@@ -160,34 +216,82 @@ export async function listGroups(): Promise<Group[]> {
   return rows.map(mapGroup);
 }
 
-export async function createGroup(name: string, kind: GroupKind = 'expense'): Promise<Group> {
+export async function createGroup(
+  name: string,
+  kind: GroupKind = 'expense',
+  parentId: string | null = null
+): Promise<Group> {
   const db = await getDatabase();
+  await assertGroupParent(null, parentId, kind);
   const group: Group = {
     id: createId(),
     name: name.trim(),
     kind,
+    parentId,
     createdAt: new Date().toISOString(),
   };
-  await db.runAsync('INSERT INTO groups (id, name, kind, created_at) VALUES (?, ?, ?, ?)', [
-    group.id,
-    group.name,
-    group.kind,
-    group.createdAt,
-  ]);
+  await db.runAsync(
+    'INSERT INTO groups (id, name, kind, parent_id, created_at) VALUES (?, ?, ?, ?, ?)',
+    [group.id, group.name, group.kind, group.parentId, group.createdAt]
+  );
   return group;
 }
 
-export async function updateGroup(id: string, name: string, kind: GroupKind): Promise<void> {
+export async function updateGroup(
+  id: string,
+  name: string,
+  kind: GroupKind,
+  parentId: string | null = null
+): Promise<void> {
   const db = await getDatabase();
-  await db.runAsync('UPDATE groups SET name = ?, kind = ? WHERE id = ?', [
+  await assertGroupParent(id, parentId, kind);
+  const groups = await listGroups();
+  const children = groups.filter((group) => group.parentId === id);
+  if (children.some((child) => child.kind !== kind)) {
+    throw new Error(__('error.category_has_children'));
+  }
+  await db.runAsync('UPDATE groups SET name = ?, kind = ?, parent_id = ? WHERE id = ?', [
     name.trim(),
     kind,
+    parentId,
     id,
   ]);
 }
 
+async function assertGroupParent(
+  id: string | null,
+  parentId: string | null,
+  kind: GroupKind
+): Promise<void> {
+  if (!parentId) return;
+  if (id && parentId === id) throw new Error(__('error.category_cycle'));
+  const groups = await listGroups();
+  const parent = groups.find((group) => group.id === parentId);
+  if (!parent) throw new Error(__('error.category_parent_missing'));
+  if (parent.kind !== kind) throw new Error(__('error.category_parent_kind'));
+  if (!id) return;
+
+  const childrenOf = new Map<string, string[]>();
+  for (const group of groups) {
+    if (!group.parentId) continue;
+    const list = childrenOf.get(group.parentId) ?? [];
+    list.push(group.id);
+    childrenOf.set(group.parentId, list);
+  }
+  const stack = [...(childrenOf.get(id) ?? [])];
+  const seen = new Set<string>();
+  while (stack.length > 0) {
+    const current = stack.pop() as string;
+    if (current === parentId) throw new Error(__('error.category_cycle'));
+    if (seen.has(current)) continue;
+    seen.add(current);
+    stack.push(...(childrenOf.get(current) ?? []));
+  }
+}
+
 export async function deleteGroup(id: string): Promise<void> {
   const db = await getDatabase();
+  await db.runAsync('UPDATE groups SET parent_id = NULL WHERE parent_id = ?', [id]);
   await db.runAsync('DELETE FROM groups WHERE id = ?', [id]);
 }
 
@@ -371,6 +475,9 @@ async function insertExpense(partial: {
   startDate: string;
   endDate: string | null;
   groupId: string | null;
+  paymentMethodId: string | null;
+  bankAccountId: string | null;
+  includeInLivingCost: boolean;
   active: boolean;
   parentId: string | null;
   yearMonth: string | null;
@@ -389,6 +496,9 @@ async function insertExpense(partial: {
     startDate: partial.startDate,
     endDate: partial.endDate,
     groupId: partial.groupId,
+    paymentMethodId: partial.paymentMethodId,
+    bankAccountId: partial.bankAccountId,
+    includeInLivingCost: partial.includeInLivingCost,
     active: partial.active,
     createdAt: new Date().toISOString(),
     parentId: partial.parentId,
@@ -399,8 +509,9 @@ async function insertExpense(partial: {
   };
   await db.runAsync(
     `INSERT INTO expenses
-      (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at, parent_id, year_month, paid, paid_at, excluded)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at,
+       parent_id, year_month, paid, paid_at, excluded, payment_method_id, bank_account_id, include_in_living_cost)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       item.id,
       item.name,
@@ -417,9 +528,31 @@ async function insertExpense(partial: {
       item.paid ? 1 : 0,
       item.paidAt,
       item.excluded ? 1 : 0,
+      item.paymentMethodId,
+      item.bankAccountId,
+      item.includeInLivingCost ? 1 : 0,
     ]
   );
   return item;
+}
+
+function childFromInput(input: ExpenseInput, yearMonth: string, parentId: string | null): Parameters<typeof insertExpense>[0] {
+  return {
+    name: input.name,
+    amount: input.amount,
+    recurrence: null,
+    dueDay: clampDueDay(input.dueDay, yearMonth),
+    startDate: monthBounds(yearMonth).start,
+    endDate: monthBounds(yearMonth).end,
+    groupId: input.groupId,
+    paymentMethodId: input.paymentMethodId,
+    bankAccountId: input.bankAccountId,
+    includeInLivingCost: input.includeInLivingCost,
+    active: true,
+    parentId,
+    yearMonth,
+    paid: false,
+  };
 }
 
 /**
@@ -431,40 +564,22 @@ export async function createExpense(
   input: ExpenseInput,
   yearMonth: string = currentYearMonth()
 ): Promise<Expense> {
-  if (input.recurrence) {
+  const includeInLivingCost =
+    input.includeInLivingCost ?? defaultIncludeInLivingCost(input.recurrence);
+  const normalized = { ...input, includeInLivingCost };
+  if (normalized.recurrence) {
     const parent = await insertExpense({
-      ...input,
+      ...normalized,
       parentId: null,
       yearMonth: null,
       paid: false,
     });
-    return insertExpense({
-      name: input.name,
-      amount: input.amount,
-      recurrence: null,
-      dueDay: clampDueDay(input.dueDay, yearMonth),
-      startDate: monthBounds(yearMonth).start,
-      endDate: monthBounds(yearMonth).end,
-      groupId: input.groupId,
-      active: true,
-      parentId: parent.id,
-      yearMonth,
-      paid: false,
-    });
+    return insertExpense(childFromInput(normalized, yearMonth, parent.id));
   }
 
   return insertExpense({
-    name: input.name,
-    amount: input.amount,
-    recurrence: null,
-    dueDay: clampDueDay(input.dueDay, yearMonth),
-    startDate: monthBounds(yearMonth).start,
-    endDate: monthBounds(yearMonth).end,
-    groupId: input.groupId,
-    active: input.active,
-    parentId: null,
-    yearMonth,
-    paid: false,
+    ...childFromInput(normalized, yearMonth, null),
+    active: normalized.active,
   });
 }
 
@@ -475,12 +590,12 @@ export async function createExpenseChildFromParent(
 ): Promise<Expense> {
   const parent = await getExpenseById(parentId);
   if (!parent || parent.yearMonth) {
-    throw new Error('Lançamento pai inválido');
+    throw new Error(__('error.invalid_parent_expense'));
   }
 
   const existing = await getExpenseChildForParentMonth(parentId, yearMonth);
   if (existing && !existing.excluded) {
-    throw new Error(`Já existe ocorrência em ${yearMonthLabel(yearMonth)}`);
+    throw new Error(__('error.child_exists', { month: yearMonthLabel(yearMonth) }));
   }
   if (existing?.excluded) {
     await restoreExpenseChild(existing.id);
@@ -501,6 +616,9 @@ export async function createExpenseChildFromParent(
     startDate: monthBounds(yearMonth).start,
     endDate: monthBounds(yearMonth).end,
     groupId: parent.groupId,
+    paymentMethodId: parent.paymentMethodId,
+    bankAccountId: parent.bankAccountId,
+    includeInLivingCost: parent.includeInLivingCost,
     active: true,
     parentId: parent.id,
     yearMonth,
@@ -535,7 +653,8 @@ export async function updateExpense(
     await db.runAsync(
       `UPDATE expenses
        SET name = ?, amount = ?, due_day = ?, group_id = ?, active = ?,
-           start_date = ?, end_date = ?
+           start_date = ?, end_date = ?, payment_method_id = ?, bank_account_id = ?,
+           include_in_living_cost = ?
        WHERE id = ?`,
       [
         input.name.trim(),
@@ -545,6 +664,9 @@ export async function updateExpense(
         input.active ? 1 : 0,
         input.startDate,
         input.endDate,
+        input.paymentMethodId,
+        input.bankAccountId,
+        input.includeInLivingCost ? 1 : 0,
         existing.id,
       ]
     );
@@ -555,7 +677,8 @@ export async function updateExpense(
 
   await db.runAsync(
     `UPDATE expenses
-     SET name = ?, amount = ?, recurrence = ?, due_day = ?, start_date = ?, end_date = ?, group_id = ?, active = ?
+     SET name = ?, amount = ?, recurrence = ?, due_day = ?, start_date = ?, end_date = ?,
+         group_id = ?, active = ?, payment_method_id = ?, bank_account_id = ?, include_in_living_cost = ?
      WHERE id = ?`,
     [
       input.name.trim(),
@@ -566,21 +689,27 @@ export async function updateExpense(
       input.endDate,
       input.groupId,
       input.active ? 1 : 0,
+      input.paymentMethodId,
+      input.bankAccountId,
+      input.includeInLivingCost ? 1 : 0,
       parentId,
     ]
   );
 
-  // Reflete no débito filho do mês em tela (nome/valor/dia/grupo).
   if (syncYearMonth) {
     await db.runAsync(
       `UPDATE expenses
-       SET name = ?, amount = ?, due_day = ?, group_id = ?
+       SET name = ?, amount = ?, due_day = ?, group_id = ?,
+           payment_method_id = ?, bank_account_id = ?, include_in_living_cost = ?
        WHERE parent_id = ? AND year_month = ? AND IFNULL(excluded, 0) = 0`,
       [
         input.name.trim(),
         input.amount,
         clampDueDay(input.dueDay, syncYearMonth),
         input.groupId,
+        input.paymentMethodId,
+        input.bankAccountId,
+        input.includeInLivingCost ? 1 : 0,
         parentId,
         syncYearMonth,
       ]
@@ -588,15 +717,24 @@ export async function updateExpense(
   }
 }
 
-/** Atualiza só o débito filho do mês (valor/dia/nome daquele mês). */
-export async function updateExpenseChild(
-  id: string,
-  patch: { name: string; amount: number; dueDay: number; groupId: string | null }
-): Promise<void> {
+/** Atualiza só o débito filho do mês. */
+export async function updateExpenseChild(id: string, patch: ExpenseChildPatch): Promise<void> {
   const db = await getDatabase();
   await db.runAsync(
-    `UPDATE expenses SET name = ?, amount = ?, due_day = ?, group_id = ? WHERE id = ? AND year_month IS NOT NULL`,
-    [patch.name.trim(), patch.amount, patch.dueDay, patch.groupId, id]
+    `UPDATE expenses
+     SET name = ?, amount = ?, due_day = ?, group_id = ?,
+         payment_method_id = ?, bank_account_id = ?, include_in_living_cost = ?
+     WHERE id = ? AND year_month IS NOT NULL`,
+    [
+      patch.name.trim(),
+      patch.amount,
+      patch.dueDay,
+      patch.groupId,
+      patch.paymentMethodId,
+      patch.bankAccountId,
+      patch.includeInLivingCost ? 1 : 0,
+      id,
+    ]
   );
 }
 
@@ -685,6 +823,9 @@ export async function ensureExpenseChildrenForMonth(yearMonth: string): Promise<
           startDate: monthBounds(yearMonth).start,
           endDate: monthBounds(yearMonth).end,
           groupId: template.groupId,
+          paymentMethodId: template.paymentMethodId,
+          bankAccountId: template.bankAccountId,
+          includeInLivingCost: template.includeInLivingCost,
           active: true,
           parentId: template.id,
           yearMonth,
@@ -719,8 +860,21 @@ export async function ensureExpenseChildrenForMonth(yearMonth: string): Promise<
   }
 }
 
-export async function setExpensePaid(id: string, paid: boolean): Promise<void> {
+export async function setExpensePaid(
+  id: string,
+  paid: boolean,
+  details?: { paymentMethodId: string | null; bankAccountId: string | null },
+): Promise<void> {
   const db = await getDatabase();
+  if (paid && details) {
+    await db.runAsync(
+      `UPDATE expenses
+       SET paid = 1, paid_at = ?, payment_method_id = ?, bank_account_id = ?
+       WHERE id = ?`,
+      [new Date().toISOString(), details.paymentMethodId, details.bankAccountId, id],
+    );
+    return;
+  }
   await db.runAsync('UPDATE expenses SET paid = ?, paid_at = ? WHERE id = ?', [
     paid ? 1 : 0,
     paid ? new Date().toISOString() : null,
@@ -747,12 +901,16 @@ export async function createIncome(input: IncomeInput): Promise<Income> {
     startDate: input.startDate,
     endDate: input.endDate,
     groupId: input.groupId,
+    paymentMethodId: input.paymentMethodId,
+    bankAccountId: input.bankAccountId,
     active: input.active,
     createdAt: new Date().toISOString(),
   };
   await db.runAsync(
-    `INSERT INTO incomes (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO incomes
+      (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at,
+       payment_method_id, bank_account_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       item.id,
       item.name,
@@ -764,6 +922,8 @@ export async function createIncome(input: IncomeInput): Promise<Income> {
       item.groupId,
       item.active ? 1 : 0,
       item.createdAt,
+      item.paymentMethodId,
+      item.bankAccountId,
     ]
   );
   return item;
@@ -773,7 +933,8 @@ export async function updateIncome(id: string, input: IncomeInput): Promise<void
   const db = await getDatabase();
   await db.runAsync(
     `UPDATE incomes
-     SET name = ?, amount = ?, recurrence = ?, due_day = ?, start_date = ?, end_date = ?, group_id = ?, active = ?
+     SET name = ?, amount = ?, recurrence = ?, due_day = ?, start_date = ?, end_date = ?,
+         group_id = ?, active = ?, payment_method_id = ?, bank_account_id = ?
      WHERE id = ?`,
     [
       input.name.trim(),
@@ -784,6 +945,8 @@ export async function updateIncome(id: string, input: IncomeInput): Promise<void
       input.endDate,
       input.groupId,
       input.active ? 1 : 0,
+      input.paymentMethodId,
+      input.bankAccountId,
       id,
     ]
   );
@@ -829,20 +992,21 @@ export async function unmarkExpensePaid(expenseId: string, yearMonth: string): P
 
 // —— Patrimônio ——
 
-/** Lista patrimônios raiz (sem pai), com saldo = valor próprio + aportes filhos. */
+/** Lista patrimônios raiz. O saldo é o valor até o mês vigente, sem aportes futuros. */
 export async function listAssets(): Promise<AssetWithBalance[]> {
   const all = await listAllAssets();
+  const asOf = currentYearMonth();
   const roots = all.filter((a) => !a.parentId);
   const children = all.filter((a) => a.parentId);
   return roots
     .map((root) => {
       const kids = children.filter((c) => c.parentId === root.id);
-      const kidsTotal = kids.reduce((sum, c) => sum + c.amount, 0);
-      const aporteMonths = [...new Set(kids.map((c) => c.yearMonth))].sort();
+      const happened = kids.filter((child) => child.yearMonth <= asOf);
+      const aporteMonths = [...new Set(happened.map((c) => c.yearMonth))].sort();
       return {
         ...root,
-        balance: root.amount + kidsTotal,
-        childrenCount: kids.length,
+        balance: valueAsOf(root, kids, asOf),
+        childrenCount: happened.length,
         aporteMonths,
       };
     })
@@ -866,7 +1030,7 @@ export async function listAssetChildren(parentId: string): Promise<Asset[]> {
 
 export async function createAsset(input: AssetInput, parentId: string | null = null): Promise<Asset> {
   const db = await getDatabase();
-  const yearMonth = input.date.slice(0, 7);
+  const yearMonth = canonicalYearMonth(null, input.date);
   const asset: Asset = {
     id: createId(),
     name: input.name.trim(),
@@ -877,11 +1041,17 @@ export async function createAsset(input: AssetInput, parentId: string | null = n
     parentId,
     active: true,
     createdAt: new Date().toISOString(),
+    classification: parentId ? ((await getAssetById(parentId))?.classification ?? input.classification) : input.classification,
+    generatesIncome: parentId ? false : input.generatesIncome,
+    installment: parentId ? null : input.installment,
+    cetAnnual: parentId ? null : input.cetAnnual,
+    countsAsDebt: parentId ? false : input.countsAsDebt,
   };
   await db.runAsync(
     `INSERT INTO assets
-      (id, name, type, notes, amount, date, year_month, parent_id, active, created_at)
-     VALUES (?, ?, '', ?, ?, ?, ?, ?, 1, ?)`,
+      (id, name, type, notes, amount, date, year_month, parent_id, active, created_at,
+       classification, generates_income, installment, cet_annual, counts_as_debt)
+     VALUES (?, ?, '', ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)`,
     [
       asset.id,
       asset.name,
@@ -891,6 +1061,11 @@ export async function createAsset(input: AssetInput, parentId: string | null = n
       asset.yearMonth,
       asset.parentId,
       asset.createdAt,
+      asset.classification,
+      asset.generatesIncome ? 1 : 0,
+      asset.installment,
+      asset.cetAnnual,
+      asset.countsAsDebt ? 1 : 0,
     ]
   );
   return asset;
@@ -899,26 +1074,53 @@ export async function createAsset(input: AssetInput, parentId: string | null = n
 /** Cria um patrimônio filho (aporte) sob o pai. */
 export async function createAssetAporte(parentId: string, input: AssetInput): Promise<Asset> {
   const parent = await getAssetById(parentId);
-  if (!parent || parent.parentId) {
-    throw new Error('Patrimônio pai inválido');
+  if (!parent || parent.parentId || parent.classification === 'liability') {
+    throw new Error(__('error.asset_parent'));
   }
   return createAsset(input, parentId);
 }
 
 export async function updateAsset(id: string, input: AssetInput): Promise<void> {
   const db = await getDatabase();
-  const yearMonth = input.date.slice(0, 7);
+  const yearMonth = canonicalYearMonth(null, input.date);
+  const existing = await getAssetById(id);
+  const isChild = !!existing?.parentId;
+  const parent = isChild && existing?.parentId ? await getAssetById(existing.parentId) : null;
   await db.runAsync(
-    `UPDATE assets SET name = ?, notes = ?, amount = ?, date = ?, year_month = ? WHERE id = ?`,
+    `UPDATE assets
+     SET name = ?, notes = ?, amount = ?, date = ?, year_month = ?,
+         classification = ?, generates_income = ?, installment = ?, cet_annual = ?, counts_as_debt = ?
+     WHERE id = ?`,
     [
       input.name.trim(),
       input.notes?.trim() || null,
       input.amount,
       input.date,
       yearMonth,
+      isChild ? (parent?.classification ?? existing?.classification ?? 'good') : input.classification,
+      !isChild && input.generatesIncome ? 1 : 0,
+      isChild ? null : input.installment,
+      isChild ? null : input.cetAnnual,
+      !isChild && input.countsAsDebt ? 1 : 0,
       id,
     ]
   );
+}
+
+const transferableClassifications: AssetClassification[] = ['short_term', 'long_term', 'good'];
+
+/** Move um ativo e os aportes dele entre bem, curto prazo e longo prazo. */
+export async function moveAssetClassification(id: string, classification: AssetClassification): Promise<void> {
+  if (!transferableClassifications.includes(classification)) return;
+  const asset = await getAssetById(id);
+  if (!asset || asset.parentId || !transferableClassifications.includes(asset.classification)) return;
+  if (asset.classification === classification) return;
+  const db = await getDatabase();
+  await db.runAsync('UPDATE assets SET classification = ? WHERE id = ? OR parent_id = ?', [
+    classification,
+    id,
+    id,
+  ]);
 }
 
 export async function deleteAsset(id: string): Promise<void> {
@@ -982,17 +1184,35 @@ async function listAllPayments(): Promise<Payment[]> {
   return rows.map(mapPayment);
 }
 
+export async function listFlaggedExpenseTotals(): Promise<{ yearMonth: string; total: number }[]> {
+  const db = await getDatabase();
+  return db.getAllAsync<{ yearMonth: string; total: number }>(
+    `SELECT year_month AS yearMonth, SUM(amount) AS total
+     FROM expenses
+     WHERE year_month IS NOT NULL
+       AND IFNULL(excluded, 0) = 0
+       AND include_in_living_cost = 1
+     GROUP BY year_month`
+  );
+}
+
 export async function exportBackupData(): Promise<BackupPayload> {
-  const [groups, expenses, incomes, skips, payments, assets] = await Promise.all([
-    listGroups(),
-    listAllExpenses(),
-    listIncomes(),
-    listAllSkips(),
-    listAllPayments(),
-    listAllAssets(),
-  ]);
+  const [groups, expenses, incomes, skips, payments, assets, paymentMethods, bankAccounts, goals, lifestyleItems, locale] =
+    await Promise.all([
+      listGroups(),
+      listAllExpenses(),
+      listIncomes(),
+      listAllSkips(),
+      listAllPayments(),
+      listAllAssets(),
+      catalog.listPaymentMethods(),
+      catalog.listBankAccounts(),
+      catalog.listGoals(),
+      catalog.listLifestyleItems(),
+      catalog.getSetting('locale'),
+    ]);
   return {
-    version: 2,
+    version: 3,
     exportedAt: new Date().toISOString(),
     groups,
     expenses,
@@ -1000,16 +1220,31 @@ export async function exportBackupData(): Promise<BackupPayload> {
     skips,
     payments,
     assets,
+    paymentMethods,
+    bankAccounts,
+    goals,
+    lifestyleItems,
+    settings: { locale: locale === 'en' ? 'en' : 'pt' },
   };
+}
+
+function resolveLivingCost(expense: Expense, byId: Map<string, Expense>): boolean {
+  if (typeof expense.includeInLivingCost === 'boolean') return expense.includeInLivingCost;
+  if (expense.recurrence === 'monthly' || expense.recurrence === 'semiannual') return true;
+  if (expense.parentId) {
+    const parent = byId.get(expense.parentId);
+    if (parent?.recurrence === 'monthly' || parent?.recurrence === 'semiannual') return true;
+  }
+  return false;
 }
 
 function assertBackupPayload(raw: unknown): BackupPayload {
   if (!raw || typeof raw !== 'object') {
-    throw new Error('Arquivo de backup inválido');
+    throw new Error(__('error.backup_invalid'));
   }
   const data = raw as Partial<BackupPayload>;
-  if (data.version !== 1 && data.version !== 2) {
-    throw new Error('Versão de backup não suportada');
+  if (data.version !== 1 && data.version !== 2 && data.version !== 3) {
+    throw new Error(__('error.backup_version'));
   }
   if (
     !Array.isArray(data.groups) ||
@@ -1017,52 +1252,110 @@ function assertBackupPayload(raw: unknown): BackupPayload {
     !Array.isArray(data.incomes) ||
     !Array.isArray(data.skips)
   ) {
-    throw new Error('Arquivo de backup incompleto');
+    throw new Error(__('error.backup_incomplete'));
   }
+
+  const expenses = data.expenses.map((expense) => {
+    const row = expense as Expense;
+    return {
+      ...row,
+      excluded: !!row.excluded,
+      paymentMethodId: row.paymentMethodId ?? null,
+      bankAccountId: row.bankAccountId ?? null,
+      includeInLivingCost: row.includeInLivingCost,
+    };
+  });
+  const byId = new Map(expenses.map((expense) => [expense.id, expense]));
+  for (const expense of expenses) {
+    expense.includeInLivingCost = resolveLivingCost(expense, byId);
+  }
+
   return {
     version: data.version,
     exportedAt: typeof data.exportedAt === 'string' ? data.exportedAt : new Date().toISOString(),
-    groups: data.groups.map((g) => ({
-      ...g,
-      kind: mapGroupKind((g as Group).kind),
-    })),
-    expenses: data.expenses.map((e) => ({
-      ...e,
-      excluded: !!(e as Expense).excluded,
-    })),
-    incomes: data.incomes,
+    groups: data.groups.map((group) => {
+      const row = group as Group;
+      return {
+        ...row,
+        kind: mapGroupKind(row.kind),
+        parentId: row.parentId ?? null,
+      };
+    }),
+    expenses,
+    incomes: data.incomes.map((income) => {
+      const row = income as Income;
+      return {
+        ...row,
+        paymentMethodId: row.paymentMethodId ?? null,
+        bankAccountId: row.bankAccountId ?? null,
+      };
+    }),
     skips: data.skips,
     payments: Array.isArray(data.payments) ? data.payments : [],
     assets: Array.isArray(data.assets)
-      ? data.assets.map((a) => {
-          const raw = a as Asset & { type?: string };
-          const date = raw.date || raw.createdAt?.slice(0, 10) || new Date().toISOString().slice(0, 10);
+      ? data.assets.map((asset) => {
+          const row = asset as Asset & { type?: string };
+          const date = row.date || row.createdAt?.slice(0, 10) || new Date().toISOString().slice(0, 10);
           return {
-            id: raw.id,
-            name: raw.name,
-            notes: raw.notes ?? null,
-            amount: typeof raw.amount === 'number' ? raw.amount : 0,
+            id: row.id,
+            name: row.name,
+            notes: row.notes ?? null,
+            amount: typeof row.amount === 'number' ? row.amount : 0,
             date,
-            yearMonth: raw.yearMonth || date.slice(0, 7),
-            parentId: raw.parentId ?? null,
-            active: raw.active !== false,
-            createdAt: raw.createdAt,
+            yearMonth: row.yearMonth || date.slice(0, 7),
+            parentId: row.parentId ?? null,
+            active: row.active !== false,
+            createdAt: row.createdAt,
+            classification: mapClassification(row.classification),
+            generatesIncome: !!row.generatesIncome,
+            installment: typeof row.installment === 'number' ? row.installment : null,
+            cetAnnual: typeof row.cetAnnual === 'number' ? row.cetAnnual : null,
+            countsAsDebt: !!row.countsAsDebt,
           };
         })
       : [],
+    paymentMethods: Array.isArray(data.paymentMethods) ? data.paymentMethods : [],
+    bankAccounts: Array.isArray(data.bankAccounts) ? data.bankAccounts : [],
+    goals: Array.isArray(data.goals) ? data.goals : [],
+    lifestyleItems: Array.isArray(data.lifestyleItems) ? data.lifestyleItems : [],
+    settings: data.settings,
   };
+}
+
+function orderByParent<T extends { id: string; parentId: string | null }>(rows: T[]): T[] {
+  const pending = [...rows];
+  const done: T[] = [];
+  const seen = new Set<string>();
+  let guard = 0;
+  while (pending.length > 0 && guard <= rows.length + 1) {
+    guard += 1;
+    for (let index = pending.length - 1; index >= 0; index -= 1) {
+      const row = pending[index];
+      if (!row.parentId || seen.has(row.parentId)) {
+        done.push(row);
+        seen.add(row.id);
+        pending.splice(index, 1);
+      }
+    }
+  }
+  return done.concat(pending);
 }
 
 /** Substitui todos os dados locais pelo conteúdo do backup. */
 export async function importBackupData(raw: unknown): Promise<void> {
   const backup = assertBackupPayload(raw);
   const db = await getDatabase();
+  const keepLocale = backup.settings?.locale === 'en' || backup.settings?.locale === 'pt'
+    ? backup.settings.locale
+    : await catalog.getSetting('locale');
 
-  const parents = backup.expenses.filter((e) => !e.yearMonth);
-  const children = backup.expenses.filter((e) => !!e.yearMonth);
+  const parents = backup.expenses.filter((expense) => !expense.yearMonth);
+  const children = backup.expenses.filter((expense) => !!expense.yearMonth);
 
   await db.withTransactionAsync(async () => {
     await db.execAsync(`
+      DELETE FROM lifestyle_items;
+      DELETE FROM goals;
       DELETE FROM asset_movements;
       DELETE FROM assets;
       DELETE FROM payments;
@@ -1070,97 +1363,158 @@ export async function importBackupData(raw: unknown): Promise<void> {
       DELETE FROM expenses;
       DELETE FROM incomes;
       DELETE FROM groups;
+      DELETE FROM bank_accounts;
+      DELETE FROM payment_methods;
     `);
 
-    for (const g of backup.groups) {
-      await db.runAsync('INSERT INTO groups (id, name, kind, created_at) VALUES (?, ?, ?, ?)', [
-        g.id,
-        g.name,
-        g.kind ?? 'expense',
-        g.createdAt,
+    for (const method of backup.paymentMethods ?? []) {
+      await db.runAsync('INSERT INTO payment_methods (id, name, created_at) VALUES (?, ?, ?)', [
+        method.id,
+        method.name,
+        method.createdAt,
+      ]);
+    }
+    for (const account of backup.bankAccounts ?? []) {
+      await db.runAsync('INSERT INTO bank_accounts (id, name, created_at) VALUES (?, ?, ?)', [
+        account.id,
+        account.name,
+        account.createdAt,
       ]);
     }
 
-    const insertExpenseRow = async (e: Expense) => {
+    for (const group of orderByParent(backup.groups)) {
+      await db.runAsync(
+        'INSERT INTO groups (id, name, kind, parent_id, created_at) VALUES (?, ?, ?, ?, ?)',
+        [group.id, group.name, group.kind ?? 'expense', group.parentId, group.createdAt]
+      );
+    }
+
+    const insertExpenseRow = async (expense: Expense) => {
       await db.runAsync(
         `INSERT INTO expenses
-          (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at, parent_id, year_month, paid, paid_at, excluded)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at,
+           parent_id, year_month, paid, paid_at, excluded, payment_method_id, bank_account_id, include_in_living_cost)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          e.id,
-          e.name,
-          e.amount,
-          e.recurrence,
-          e.dueDay,
-          e.startDate,
-          e.endDate,
-          e.groupId,
-          e.active ? 1 : 0,
-          e.createdAt,
-          e.parentId,
-          e.yearMonth,
-          e.paid ? 1 : 0,
-          e.paidAt,
-          e.excluded ? 1 : 0,
+          expense.id,
+          expense.name,
+          expense.amount,
+          expense.recurrence,
+          expense.dueDay,
+          expense.startDate,
+          expense.endDate,
+          expense.groupId,
+          expense.active ? 1 : 0,
+          expense.createdAt,
+          expense.parentId,
+          expense.yearMonth,
+          expense.paid ? 1 : 0,
+          expense.paidAt,
+          expense.excluded ? 1 : 0,
+          expense.paymentMethodId,
+          expense.bankAccountId,
+          expense.includeInLivingCost ? 1 : 0,
         ]
       );
     };
 
-    for (const e of parents) await insertExpenseRow(e);
-    for (const e of children) await insertExpenseRow(e);
+    for (const expense of parents) await insertExpenseRow(expense);
+    for (const expense of children) await insertExpenseRow(expense);
 
-    for (const i of backup.incomes) {
+    for (const income of backup.incomes) {
       await db.runAsync(
         `INSERT INTO incomes
-          (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, name, amount, recurrence, due_day, start_date, end_date, group_id, active, created_at,
+           payment_method_id, bank_account_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          i.id,
-          i.name,
-          i.amount,
-          i.recurrence,
-          i.dueDay,
-          i.startDate,
-          i.endDate,
-          i.groupId,
-          i.active ? 1 : 0,
-          i.createdAt,
+          income.id,
+          income.name,
+          income.amount,
+          income.recurrence,
+          income.dueDay,
+          income.startDate,
+          income.endDate,
+          income.groupId,
+          income.active ? 1 : 0,
+          income.createdAt,
+          income.paymentMethodId ?? null,
+          income.bankAccountId ?? null,
         ]
       );
     }
 
-    for (const s of backup.skips) {
+    for (const skip of backup.skips) {
       await db.runAsync(
         `INSERT OR REPLACE INTO expense_child_skips (parent_id, year_month, created_at)
          VALUES (?, ?, ?)`,
-        [s.parentId, s.yearMonth, s.createdAt]
+        [skip.parentId, skip.yearMonth, skip.createdAt]
       );
     }
 
-    for (const p of backup.payments) {
+    for (const payment of backup.payments) {
       await db.runAsync(
         `INSERT OR REPLACE INTO payments (id, expense_id, year_month, paid_at) VALUES (?, ?, ?, ?)`,
-        [p.id, p.expenseId, p.yearMonth, p.paidAt]
+        [payment.id, payment.expenseId, payment.yearMonth, payment.paidAt]
       );
     }
 
-    for (const a of backup.assets) {
+    for (const asset of orderByParent(backup.assets)) {
       await db.runAsync(
         `INSERT INTO assets
-          (id, name, type, notes, amount, date, year_month, parent_id, active, created_at)
-         VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?)`,
+          (id, name, type, notes, amount, date, year_month, parent_id, active, created_at,
+           classification, generates_income, installment, cet_annual, counts_as_debt)
+         VALUES (?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
-          a.id,
-          a.name,
-          a.notes,
-          a.amount,
-          a.date,
-          a.yearMonth,
-          a.parentId,
-          a.active ? 1 : 0,
-          a.createdAt,
+          asset.id,
+          asset.name,
+          asset.notes,
+          asset.amount,
+          asset.date,
+          asset.yearMonth,
+          asset.parentId,
+          asset.active ? 1 : 0,
+          asset.createdAt,
+          asset.classification,
+          asset.generatesIncome ? 1 : 0,
+          asset.installment,
+          asset.cetAnnual,
+          asset.countsAsDebt ? 1 : 0,
         ]
       );
+    }
+
+    for (const goal of backup.goals ?? []) {
+      await db.runAsync(
+        `INSERT INTO goals
+          (id, name, target_amount, deadline, alignment, urgency, kind, done, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          goal.id,
+          goal.name,
+          goal.targetAmount,
+          goal.deadline,
+          goal.alignment,
+          goal.urgency,
+          goal.kind,
+          goal.done ? 1 : 0,
+          goal.createdAt,
+        ]
+      );
+    }
+
+    for (const item of backup.lifestyleItems ?? []) {
+      await db.runAsync(
+        'INSERT INTO lifestyle_items (id, name, monthly_cost, created_at) VALUES (?, ?, ?, ?)',
+        [item.id, item.name, item.monthlyCost, item.createdAt]
+      );
+    }
+
+    if (keepLocale === 'en' || keepLocale === 'pt') {
+      await db.runAsync('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [
+        'locale',
+        keepLocale,
+      ]);
     }
   });
 }

@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Expense Track",
+    "name": "Value Tools",
     "slug": "expense-track",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -26,7 +26,15 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "expo-router",
+      [
+        "expo-router",
+        {
+          "headers": {
+            "Cross-Origin-Embedder-Policy": "credentialless",
+            "Cross-Origin-Opener-Policy": "same-origin"
+          }
+        }
+      ],
       [
         "expo-splash-screen",
         {
@@ -36,7 +44,9 @@
         }
       ],
       "expo-sqlite",
-      "expo-sharing"
+      "expo-sharing",
+      "expo-image",
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true,

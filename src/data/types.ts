@@ -6,8 +6,18 @@ export type Group = {
   id: string;
   name: string;
   kind: GroupKind;
+  parentId: string | null;
   createdAt: string;
 };
+
+export type NamedRecord = {
+  id: string;
+  name: string;
+  createdAt: string;
+};
+
+export type PaymentMethod = NamedRecord;
+export type BankAccount = NamedRecord;
 
 export type RecurringItem = {
   id: string;
@@ -18,6 +28,8 @@ export type RecurringItem = {
   startDate: string;
   endDate: string | null;
   groupId: string | null;
+  paymentMethodId: string | null;
+  bankAccountId: string | null;
   active: boolean;
   createdAt: string;
 };
@@ -29,6 +41,7 @@ export type Expense = RecurringItem & {
   paid: boolean;
   paidAt: string | null;
   excluded: boolean;
+  includeInLivingCost: boolean;
 };
 
 export type Income = RecurringItem;
@@ -40,7 +53,7 @@ export type Payment = {
   paidAt: string;
 };
 
-export type ExpenseInput = {
+export type EntryInput = {
   name: string;
   amount: number;
   recurrence: Recurrence;
@@ -48,10 +61,26 @@ export type ExpenseInput = {
   startDate: string;
   endDate: string | null;
   groupId: string | null;
+  paymentMethodId: string | null;
+  bankAccountId: string | null;
   active: boolean;
 };
 
-export type IncomeInput = ExpenseInput;
+export type ExpenseInput = EntryInput & {
+  includeInLivingCost: boolean;
+};
+
+export type IncomeInput = EntryInput;
+
+export type ExpenseChildPatch = {
+  name: string;
+  amount: number;
+  dueDay: number;
+  groupId: string | null;
+  paymentMethodId: string | null;
+  bankAccountId: string | null;
+  includeInLivingCost: boolean;
+};
 
 export type MonthExpenseRow = Expense & {
   groupName: string | null;
@@ -76,6 +105,8 @@ export type MonthSeriesPoint = {
   label: string;
   expenseTotal: number;
   incomeTotal: number;
+  /** Soma das saídas do mês marcadas para o custo de vida. */
+  livingCostTotal: number;
   expenseCount: number;
   expenseAvg: number;
 };
@@ -103,6 +134,8 @@ export type ExpenseChildSkip = {
   createdAt: string;
 };
 
+export type AssetClassification = 'short_term' | 'long_term' | 'good' | 'liability';
+
 export type Asset = {
   id: string;
   name: string;
@@ -113,6 +146,11 @@ export type Asset = {
   parentId: string | null;
   active: boolean;
   createdAt: string;
+  classification: AssetClassification;
+  generatesIncome: boolean;
+  installment: number | null;
+  cetAnnual: number | null;
+  countsAsDebt: boolean;
 };
 
 export type AssetInput = {
@@ -120,6 +158,42 @@ export type AssetInput = {
   notes: string | null;
   amount: number;
   date: string;
+  classification: AssetClassification;
+  generatesIncome: boolean;
+  installment: number | null;
+  cetAnnual: number | null;
+  countsAsDebt: boolean;
+};
+
+export type GoalKind = 'custom' | 'debt_payoff' | 'emergency' | 'independence';
+
+export type Goal = {
+  id: string;
+  name: string;
+  targetAmount: number;
+  deadline: string;
+  alignment: number;
+  urgency: number;
+  kind: GoalKind;
+  done: boolean;
+  createdAt: string;
+};
+
+export type GoalInput = {
+  name: string;
+  targetAmount: number;
+  deadline: string;
+  alignment: number;
+  urgency: number;
+  kind: GoalKind;
+  done: boolean;
+};
+
+export type LifestyleItem = {
+  id: string;
+  name: string;
+  monthlyCost: number;
+  createdAt: string;
 };
 
 export type AssetWithBalance = Asset & {
@@ -135,9 +209,9 @@ export type AssetSeriesPoint = {
   total: number;
 };
 
-/** Formato do arquivo JSON de backup (versão 2). */
+/** Formato do arquivo JSON de backup (versão 3; 1 e 2 continuam importáveis). */
 export type BackupPayload = {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   exportedAt: string;
   groups: Group[];
   expenses: Expense[];
@@ -145,6 +219,11 @@ export type BackupPayload = {
   skips: ExpenseChildSkip[];
   payments: Payment[];
   assets: Asset[];
+  paymentMethods?: PaymentMethod[];
+  bankAccounts?: BankAccount[];
+  goals?: Goal[];
+  lifestyleItems?: LifestyleItem[];
+  settings?: { locale?: string };
   /** @deprecated Mantido só para import de backups antigos. */
   assetMovements?: unknown[];
 };

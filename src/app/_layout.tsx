@@ -6,6 +6,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { AnimatedSplashOverlay } from '@/components/animated-icon';
 import { DataProvider, useData } from '@/data/DataProvider';
+import { I18nProvider } from '@/i18n';
 
 SplashScreen.preventAutoHideAsync();
 
@@ -23,7 +24,7 @@ function RootNavigator() {
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
       <AnimatedSplashOverlay />
       <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="(tabs)" />
+        <Stack.Screen name="(drawer)" />
       </Stack>
     </ThemeProvider>
   );
@@ -33,7 +34,9 @@ export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <DataProvider>
-        <RootNavigator />
+        <I18nProvider>
+          <RootNavigator />
+        </I18nProvider>
       </DataProvider>
     </GestureHandlerRootView>
   );

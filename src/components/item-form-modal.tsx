@@ -1,25 +1,18 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import {
-  Modal,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Switch,
-  TextInput,
-  View,
-} from 'react-native';
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, TextInput, View } from 'react-native';
 
 import { DateField } from '@/components/date-field';
 import { ThemedText } from '@/components/themed-text';
 import { ThemedView } from '@/components/themed-view';
 import { Spacing } from '@/constants/theme';
 import type {
+  BankAccount,
   Expense,
   ExpenseInput,
   Group,
   GroupKind,
+  PaymentMethod,
   Recurrence,
   RecurringItem,
 } from '@/data/types';
@@ -31,17 +24,18 @@ import {
   parseBrlInput,
   todayIso,
 } from '@/domain/format';
-import { formatBrl, yearMonthLabel } from '@/domain/recurrence';
+import { defaultIncludeInLivingCost, formatBrl, yearMonthLabel } from '@/domain/recurrence';
 import { useTheme } from '@/hooks/use-theme';
+import { useI18n } from '@/i18n';
 
 type Props = {
   visible: boolean;
   title: string;
   initial?: RecurringItem | null;
   groups: Group[];
-  /** Filtra grupos pelo tipo do lançamento (Saída/Entrada). */
+  paymentMethods: PaymentMethod[];
+  bankAccounts: BankAccount[];
   groupKind?: GroupKind;
-  /** Filhos do lançamento pai (só quando editando template). */
   childDebits?: Expense[];
   onEditChild?: (child: Expense) => void;
   onDeleteChild?: (child: Expense) => void;
@@ -50,17 +44,13 @@ type Props = {
   onSave: (input: ExpenseInput) => Promise<void>;
 };
 
-const RECURRENCE_OPTIONS: { value: Recurrence; label: string }[] = [
-  { value: 'monthly', label: 'Mensal' },
-  { value: 'semiannual', label: 'Semestral' },
-  { value: null, label: 'Sem recorrência' },
-];
-
 export function ItemFormModal({
   visible,
   title,
   initial,
   groups,
+  paymentMethods,
+  bankAccounts,
   groupKind,
   childDebits,
   onEditChild,
@@ -70,6 +60,7 @@ export function ItemFormModal({
   onSave,
 }: Props) {
   const theme = useTheme();
+  const { __ } = useI18n();
   const [name, setName] = useState('');
   const [amountText, setAmountText] = useState('');
   const [recurrence, setRecurrence] = useState<Recurrence>('monthly');
@@ -77,16 +68,28 @@ export function ItemFormModal({
   const [startDate, setStartDate] = useState(todayIso());
   const [endDate, setEndDate] = useState<string | null>(null);
   const [groupId, setGroupId] = useState<string | null>(null);
+  const [paymentMethodId, setPaymentMethodId] = useState<string | null>(null);
+  const [bankAccountId, setBankAccountId] = useState<string | null>(null);
+  const [includeInLivingCost, setIncludeInLivingCost] = useState(true);
+  const [flagTouched, setFlagTouched] = useState(false);
   const [active, setActive] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const isChildEdit =
-    !!initial && 'yearMonth' in initial && !!(initial as Expense).yearMonth;
-  const isParentEdit =
-    !!initial && 'yearMonth' in initial && !(initial as Expense).yearMonth && !isChildEdit;
-  const visibleGroups = groupKind ? groups.filter((g) => g.kind === groupKind) : groups;
-  const activeChildren = (childDebits ?? []).filter((c) => !c.excluded);
+  const isChildEdit = !!initial && 'yearMonth' in initial && !!(initial as Expense).yearMonth;
+  const isParentEdit = !!initial && 'yearMonth' in initial && !(initial as Expense).yearMonth && !isChildEdit;
+  const isExpense = groupKind !== 'income';
+  const visibleGroups = groupKind ? groups.filter((group) => group.kind === groupKind) : groups;
+  const activeChildren = (childDebits ?? []).filter((child) => !child.excluded);
+  const recurrenceOptions = useMemo(
+    () =>
+      [
+        { value: 'monthly' as Recurrence, label: __('recurrence.monthly') },
+        { value: 'semiannual' as Recurrence, label: __('recurrence.semiannual') },
+        { value: null, label: __('recurrence.none') },
+      ],
+    [__]
+  );
 
   useEffect(() => {
     if (!visible) return;
@@ -98,6 +101,12 @@ export function ItemFormModal({
       setStartDate(initial.startDate);
       setEndDate(initial.endDate);
       setGroupId(initial.groupId);
+      setPaymentMethodId(initial.paymentMethodId);
+      setBankAccountId(initial.bankAccountId);
+      setIncludeInLivingCost(
+        'includeInLivingCost' in initial ? !!(initial as Expense).includeInLivingCost : false
+      );
+      setFlagTouched(true);
       setActive(initial.active);
     } else {
       setName('');
@@ -107,29 +116,40 @@ export function ItemFormModal({
       setStartDate(todayIso());
       setEndDate(null);
       setGroupId(null);
+      setPaymentMethodId(null);
+      setBankAccountId(null);
+      setIncludeInLivingCost(isExpense);
+      setFlagTouched(false);
       setActive(true);
     }
     setError(null);
-  }, [visible, initial]);
+  }, [visible, initial, isExpense]);
+
+  function chooseRecurrence(value: Recurrence) {
+    setRecurrence(value);
+    if (!initial && !flagTouched && isExpense) {
+      setIncludeInLivingCost(defaultIncludeInLivingCost(value));
+    }
+  }
 
   async function handleSave() {
     const amount = parseBrlInput(amountText);
     const dueDay = Number(dueDayText);
 
     if (!name.trim()) {
-      setError('Informe o nome.');
+      setError(__('error.name'));
       return;
     }
     if (!(amount > 0)) {
-      setError('Informe um valor válido.');
+      setError(__('error.amount'));
       return;
     }
     if (!Number.isInteger(dueDay) || dueDay < 1 || dueDay > 31) {
-      setError('Dia de vencimento deve ser entre 1 e 31.');
+      setError(__('error.due_day'));
       return;
     }
     if (!isChildEdit && !startDate) {
-      setError('Informe a data de início.');
+      setError(__('error.start'));
       return;
     }
 
@@ -143,22 +163,21 @@ export function ItemFormModal({
         startDate: isChildEdit ? initial!.startDate : startDate,
         endDate: isChildEdit ? initial!.endDate : endDate,
         groupId,
+        paymentMethodId,
+        bankAccountId,
+        includeInLivingCost: isExpense ? includeInLivingCost : false,
         active: isChildEdit ? true : active,
       });
       onClose();
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Erro ao salvar.');
+      setError(e instanceof Error ? e.message : __('error.save'));
     } finally {
       setSaving(false);
     }
   }
 
   return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={onClose}>
+    <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
       <ThemedView style={styles.container}>
         <View style={styles.header}>
           <Pressable onPress={onClose} hitSlop={10} style={styles.backButton}>
@@ -168,20 +187,20 @@ export function ItemFormModal({
         </View>
 
         <ScrollView contentContainerStyle={styles.form} keyboardShouldPersistTaps="handled">
-          <Field label="Nome">
+          <Field label={__('common.name')}>
             <TextInput
               value={name}
               onChangeText={setName}
-              placeholder="Ex.: Aluguel"
+              placeholder={__('entry.name_ph')}
               placeholderTextColor={theme.textSecondary}
               style={[styles.input, { color: theme.text, backgroundColor: theme.backgroundElement }]}
             />
           </Field>
 
-          <Field label="Valor (R$)">
+          <Field label={__('entry.amount')}>
             <TextInput
               value={amountText}
-              onChangeText={(t) => setAmountText(maskBrlInput(t))}
+              onChangeText={(text) => setAmountText(maskBrlInput(text))}
               keyboardType="number-pad"
               placeholder="0,00"
               placeholderTextColor={theme.textSecondary}
@@ -190,24 +209,22 @@ export function ItemFormModal({
           </Field>
 
           {!isChildEdit && (
-            <Field label="Recorrência">
+            <Field label={__('entry.recurrence')}>
               <View style={styles.chips}>
-                {RECURRENCE_OPTIONS.map((opt) => {
-                  const selected = recurrence === opt.value;
+                {recurrenceOptions.map((option) => {
+                  const selected = recurrence === option.value;
                   return (
                     <Pressable
-                      key={String(opt.value)}
-                      onPress={() => setRecurrence(opt.value)}
+                      key={String(option.value)}
+                      onPress={() => chooseRecurrence(option.value)}
                       style={[
                         styles.chip,
                         {
-                          backgroundColor: selected
-                            ? theme.backgroundSelected
-                            : theme.backgroundElement,
+                          backgroundColor: selected ? theme.backgroundSelected : theme.backgroundElement,
                         },
                       ]}>
                       <ThemedText type="small" themeColor={selected ? 'text' : 'textSecondary'}>
-                        {opt.label}
+                        {option.label}
                       </ThemedText>
                     </Pressable>
                   );
@@ -215,16 +232,16 @@ export function ItemFormModal({
               </View>
               {recurrence === null && (
                 <ThemedText type="small" themeColor="textSecondary" style={styles.hint}>
-                  Sem recorrência gera apenas o débito do mês atual.
+                  {__('entry.recurrence_hint')}
                 </ThemedText>
               )}
             </Field>
           )}
 
-          <Field label="Dia de vencimento">
+          <Field label={__('entry.due_day')}>
             <TextInput
               value={dueDayText}
-              onChangeText={(t) => setDueDayText(maskDueDayInput(t))}
+              onChangeText={(text) => setDueDayText(maskDueDayInput(text))}
               keyboardType="number-pad"
               placeholder="1–31"
               maxLength={2}
@@ -236,18 +253,17 @@ export function ItemFormModal({
           {!isChildEdit && (
             <>
               <DateField
-                label="Data de início"
+                label={__('entry.start')}
                 value={startDate}
-                placeholder="Selecionar data"
+                placeholder={__('entry.pick_date')}
                 onChange={(iso) => {
                   if (iso) setStartDate(iso);
                 }}
               />
-
               <DateField
-                label="Data de término (opcional)"
+                label={__('entry.end')}
                 value={endDate}
-                placeholder="Sem término"
+                placeholder={__('entry.no_end')}
                 optional
                 onChange={setEndDate}
               />
@@ -256,54 +272,53 @@ export function ItemFormModal({
 
           {isChildEdit && (initial as Expense).yearMonth && (
             <ThemedText type="small" themeColor="textSecondary">
-              Débito de {yearMonthLabel((initial as Expense).yearMonth!)}
+              {__('entry.debit_of', { month: yearMonthLabel((initial as Expense).yearMonth!) })}
               {(initial as Expense).paid
-                ? ` · Pago${(initial as Expense).paidAt ? ` em ${formatDateInput((initial as Expense).paidAt!.slice(0, 10))}` : ''}`
-                : ' · Em aberto'}
+                ? ` · ${(initial as Expense).paidAt
+                    ? __('entry.paid_on', { date: formatDateInput((initial as Expense).paidAt!.slice(0, 10)) })
+                    : __('entry.paid')}`
+                : ` · ${__('entry.open')}`}
             </ThemedText>
           )}
 
-          <Field label="Grupo (opcional)">
-            <View style={styles.chips}>
-              <Pressable
-                onPress={() => setGroupId(null)}
-                style={[
-                  styles.chip,
-                  {
-                    backgroundColor:
-                      groupId === null ? theme.backgroundSelected : theme.backgroundElement,
-                  },
-                ]}>
-                <ThemedText type="small" themeColor={groupId === null ? 'text' : 'textSecondary'}>
-                  Nenhum
-                </ThemedText>
-              </Pressable>
-              {visibleGroups.map((g) => {
-                const selected = groupId === g.id;
-                return (
-                  <Pressable
-                    key={g.id}
-                    onPress={() => setGroupId(g.id)}
-                    style={[
-                      styles.chip,
-                      {
-                        backgroundColor: selected
-                          ? theme.backgroundSelected
-                          : theme.backgroundElement,
-                      },
-                    ]}>
-                    <ThemedText type="small" themeColor={selected ? 'text' : 'textSecondary'}>
-                      {g.name}
-                    </ThemedText>
-                  </Pressable>
-                );
-              })}
+          <ChipField
+            label={__('entry.category')}
+            value={groupId}
+            options={visibleGroups.map((group) => ({ id: group.id, name: group.name }))}
+            onChange={setGroupId}
+            noneLabel={__('common.none')}
+          />
+          <ChipField
+            label={__('entry.payment')}
+            value={paymentMethodId}
+            options={paymentMethods}
+            onChange={setPaymentMethodId}
+            noneLabel={__('common.none')}
+          />
+          <ChipField
+            label={__('entry.account')}
+            value={bankAccountId}
+            options={bankAccounts}
+            onChange={setBankAccountId}
+            noneLabel={__('common.none')}
+          />
+
+          {isExpense && (
+            <View style={styles.switchRow}>
+              <ThemedText style={styles.switchLabel}>{__('entry.living_cost')}</ThemedText>
+              <Switch
+                value={includeInLivingCost}
+                onValueChange={(value) => {
+                  setFlagTouched(true);
+                  setIncludeInLivingCost(value);
+                }}
+              />
             </View>
-          </Field>
+          )}
 
           {!isChildEdit && (
             <View style={styles.switchRow}>
-              <ThemedText>Ativo</ThemedText>
+              <ThemedText>{__('common.active')}</ThemedText>
               <Switch value={active} onValueChange={setActive} />
             </View>
           )}
@@ -317,43 +332,36 @@ export function ItemFormModal({
           <Pressable
             onPress={handleSave}
             disabled={saving}
-            style={[
-              styles.saveButton,
-              { backgroundColor: theme.accent, opacity: saving ? 0.6 : 1 },
-            ]}>
-            <ThemedText style={styles.saveLabel}>{saving ? 'Salvando…' : 'Salvar'}</ThemedText>
+            style={[styles.saveButton, { backgroundColor: theme.accent, opacity: saving ? 0.6 : 1 }]}>
+            <ThemedText style={styles.saveLabel}>{saving ? __('common.saving') : __('common.save')}</ThemedText>
           </Pressable>
 
           {!isChildEdit && childDebits !== undefined && (isParentEdit || activeChildren.length > 0) && (
             <View style={styles.childrenSection}>
               <View style={styles.childrenHeader}>
                 <View style={{ flex: 1, gap: 2 }}>
-                  <ThemedText type="smallBold">Débitos gerados</ThemedText>
+                  <ThemedText type="smallBold">{__('entry.generated')}</ThemedText>
                   <ThemedText type="small" themeColor="textSecondary">
-                    Filhos deste lançamento recorrente
+                    {__('entry.generated_hint')}
                   </ThemedText>
                 </View>
                 {onAddChild && isParentEdit && (
-                  <Pressable
-                    onPress={onAddChild}
-                    style={[styles.addChildBtn, { backgroundColor: theme.accent }]}>
+                  <Pressable onPress={onAddChild} style={[styles.addChildBtn, { backgroundColor: theme.accent }]}>
                     <ThemedText type="small" style={styles.addChildLabel}>
-                      + Ocorrência
+                      {__('entry.add_occurrence')}
                     </ThemedText>
                   </Pressable>
                 )}
               </View>
               {activeChildren.map((child) => (
-                <View
-                  key={child.id}
-                  style={[styles.childRow, { backgroundColor: theme.backgroundElement }]}>
+                <View key={child.id} style={[styles.childRow, { backgroundColor: theme.backgroundElement }]}>
                   <View style={styles.childMain}>
                     <ThemedText type="smallBold">
                       {child.yearMonth ? yearMonthLabel(child.yearMonth) : child.name}
                     </ThemedText>
                     <ThemedText type="small" themeColor="textSecondary">
-                      Dia {child.dueDay} · {formatBrl(child.amount)}
-                      {child.paid ? ' · Pago' : ' · Em aberto'}
+                      {__('common.day')} {child.dueDay} · {formatBrl(child.amount)}
+                      {child.paid ? ` · ${__('entry.paid')}` : ` · ${__('entry.open')}`}
                     </ThemedText>
                   </View>
                   <View style={styles.childActions}>
@@ -378,7 +386,7 @@ export function ItemFormModal({
               ))}
               {activeChildren.length === 0 && (
                 <ThemedText type="small" themeColor="textSecondary">
-                  Nenhuma ocorrência gerada ainda.
+                  {__('entry.no_occurrences')}
                 </ThemedText>
               )}
             </View>
@@ -388,6 +396,54 @@ export function ItemFormModal({
         </ScrollView>
       </ThemedView>
     </Modal>
+  );
+}
+
+function ChipField({
+  label,
+  value,
+  options,
+  onChange,
+  noneLabel,
+}: {
+  label: string;
+  value: string | null;
+  options: { id: string; name: string }[];
+  onChange: (id: string | null) => void;
+  noneLabel: string;
+}) {
+  const theme = useTheme();
+  return (
+    <Field label={label}>
+      <View style={styles.chips}>
+        <Pressable
+          onPress={() => onChange(null)}
+          style={[
+            styles.chip,
+            { backgroundColor: value === null ? theme.backgroundSelected : theme.backgroundElement },
+          ]}>
+          <ThemedText type="small" themeColor={value === null ? 'text' : 'textSecondary'}>
+            {noneLabel}
+          </ThemedText>
+        </Pressable>
+        {options.map((option) => {
+          const selected = value === option.id;
+          return (
+            <Pressable
+              key={option.id}
+              onPress={() => onChange(option.id)}
+              style={[
+                styles.chip,
+                { backgroundColor: selected ? theme.backgroundSelected : theme.backgroundElement },
+              ]}>
+              <ThemedText type="small" themeColor={selected ? 'text' : 'textSecondary'}>
+                {option.name}
+              </ThemedText>
+            </Pressable>
+          );
+        })}
+      </View>
+    </Field>
   );
 }
 
@@ -410,66 +466,23 @@ const styles = StyleSheet.create({
     paddingTop: Spacing.four,
     paddingBottom: Spacing.two,
   },
-  backButton: {
-    marginLeft: -Spacing.one,
-  },
-  form: {
-    padding: Spacing.four,
-    gap: Spacing.three,
-    paddingBottom: Spacing.six,
-  },
+  backButton: { marginLeft: -Spacing.one },
+  form: { padding: Spacing.four, gap: Spacing.three, paddingBottom: Spacing.six },
   field: { gap: Spacing.one },
-  input: {
-    borderRadius: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    fontSize: 16,
-  },
+  input: { borderRadius: Spacing.two, paddingHorizontal: Spacing.three, paddingVertical: Spacing.two, fontSize: 16 },
   chips: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.two },
-  chip: {
-    paddingHorizontal: Spacing.three,
-    paddingVertical: Spacing.two,
-    borderRadius: Spacing.three,
-  },
+  chip: { paddingHorizontal: Spacing.three, paddingVertical: Spacing.two, borderRadius: Spacing.three },
   hint: { marginTop: Spacing.one },
-  switchRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-  },
-  saveButton: {
-    marginTop: Spacing.two,
-    borderRadius: Spacing.three,
-    paddingVertical: Spacing.three,
-    alignItems: 'center',
-  },
+  switchRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: Spacing.three },
+  switchLabel: { flex: 1 },
+  saveButton: { marginTop: Spacing.two, borderRadius: Spacing.three, paddingVertical: Spacing.three, alignItems: 'center' },
   saveLabel: { color: '#fff', fontWeight: '700' },
   childrenSection: { gap: Spacing.two, marginTop: Spacing.two },
-  childrenHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-  },
-  addChildBtn: {
-    paddingHorizontal: Spacing.two,
-    paddingVertical: Spacing.one,
-    borderRadius: Spacing.two,
-  },
+  childrenHeader: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  addChildBtn: { paddingHorizontal: Spacing.two, paddingVertical: Spacing.one, borderRadius: Spacing.two },
   addChildLabel: { color: '#fff', fontWeight: '700' },
-  childRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: Spacing.three,
-    borderRadius: Spacing.two,
-    gap: Spacing.two,
-  },
+  childRow: { flexDirection: 'row', alignItems: 'center', padding: Spacing.three, borderRadius: Spacing.two, gap: Spacing.two },
   childMain: { flex: 1, gap: 2 },
   childActions: { flexDirection: 'row', gap: Spacing.one },
-  childBtn: {
-    width: 32,
-    height: 32,
-    borderRadius: Spacing.two,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
+  childBtn: { width: 32, height: 32, borderRadius: Spacing.two, alignItems: 'center', justifyContent: 'center' },
 });

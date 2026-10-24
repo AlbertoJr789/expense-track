@@ -1,6 +1,7 @@
 import { getDatabase } from '@/db/database';
+import * as catalog from '@/db/catalog';
 import * as repo from '@/db/repository';
-import { currentYearMonth } from '@/domain/recurrence';
+import { addMonths, currentYearMonth } from '@/domain/recurrence';
 
 type SeedItem = { name: string; amount: number; dueDay: number };
 
@@ -54,6 +55,9 @@ export async function seedIfEmpty(): Promise<void> {
         startDate,
         endDate: null,
         groupId,
+        paymentMethodId: null,
+        bankAccountId: null,
+        includeInLivingCost: true,
         active: true,
       });
     }
@@ -71,6 +75,60 @@ export async function seedIfEmpty(): Promise<void> {
     startDate,
     endDate: null,
     groupId: null,
+    paymentMethodId: null,
+    bankAccountId: null,
     active: true,
   });
+}
+
+const PAYMENT_METHODS = ['Cartão', 'Crédito', 'Pix', 'Boleto'];
+
+export async function seedCatalogs(): Promise<void> {
+  const methodsSeeded = await catalog.getSetting('payment_methods_seeded');
+  if (!methodsSeeded) {
+    const methods = await catalog.listPaymentMethods();
+    if (methods.length === 0) {
+      for (const name of PAYMENT_METHODS) {
+        await catalog.createPaymentMethod(name);
+      }
+    }
+    await catalog.setSetting('payment_methods_seeded', '1');
+  }
+
+  const goalsSeeded = await catalog.getSetting('goals_seeded');
+  if (!goalsSeeded) {
+    const goals = await catalog.listGoals();
+    if (goals.length === 0) {
+      const shortDeadline = `${addMonths(currentYearMonth(), 12)}-01`;
+      const longDeadline = `${addMonths(currentYearMonth(), 120)}-01`;
+      await catalog.createGoal({
+        name: 'Quitar dívidas caras',
+        targetAmount: 0,
+        deadline: shortDeadline,
+        alignment: 5,
+        urgency: 5,
+        kind: 'debt_payoff',
+        done: false,
+      });
+      await catalog.createGoal({
+        name: 'Reserva de emergência',
+        targetAmount: 0,
+        deadline: shortDeadline,
+        alignment: 5,
+        urgency: 4,
+        kind: 'emergency',
+        done: false,
+      });
+      await catalog.createGoal({
+        name: 'Independência financeira',
+        targetAmount: 0,
+        deadline: longDeadline,
+        alignment: 5,
+        urgency: 3,
+        kind: 'independence',
+        done: false,
+      });
+    }
+    await catalog.setSetting('goals_seeded', '1');
+  }
 }

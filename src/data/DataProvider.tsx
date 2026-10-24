@@ -1,23 +1,31 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 
 import { exportBackup, importBackup } from '@/db/backup';
+import * as catalog from '@/db/catalog';
 import * as repo from '@/db/repository';
-import { seedIfEmpty } from '@/db/seed';
+import { seedCatalogs, seedIfEmpty } from '@/db/seed';
 import type {
   Asset,
+  AssetClassification,
   AssetInput,
   AssetSeriesPoint,
   AssetWithBalance,
+  BankAccount,
   Expense,
+  ExpenseChildPatch,
   ExpenseInput,
+  Goal,
+  GoalInput,
   Group,
   GroupKind,
   Income,
   IncomeInput,
+  LifestyleItem,
   MonthExpenseRow,
   MonthIncomeRow,
   MonthSeriesPoint,
   MonthSummary,
+  PaymentMethod,
   TransactionSeriesResult,
 } from '@/data/types';
 import {
@@ -35,16 +43,17 @@ type DataContextValue = {
   expenses: Expense[];
   incomes: Income[];
   assets: AssetWithBalance[];
+  paymentMethods: PaymentMethod[];
+  bankAccounts: BankAccount[];
+  goals: Goal[];
+  lifestyleItems: LifestyleItem[];
   refresh: () => Promise<void>;
-  createGroup: (name: string, kind: GroupKind) => Promise<void>;
-  updateGroup: (id: string, name: string, kind: GroupKind) => Promise<void>;
+  createGroup: (name: string, kind: GroupKind, parentId?: string | null) => Promise<void>;
+  updateGroup: (id: string, name: string, kind: GroupKind, parentId?: string | null) => Promise<void>;
   deleteGroup: (id: string) => Promise<void>;
   createExpense: (input: ExpenseInput, yearMonth?: string) => Promise<void>;
   updateExpense: (id: string, input: ExpenseInput, syncYearMonth?: string) => Promise<void>;
-  updateExpenseChild: (
-    id: string,
-    patch: { name: string; amount: number; dueDay: number; groupId: string | null }
-  ) => Promise<void>;
+  updateExpenseChild: (id: string, patch: ExpenseChildPatch) => Promise<void>;
   deleteExpense: (id: string) => Promise<void>;
   restoreExpenseChild: (id: string) => Promise<void>;
   createExpenseChildFromParent: (parentId: string, yearMonth: string) => Promise<Expense>;
@@ -62,16 +71,35 @@ type DataContextValue = {
     incomes: MonthIncomeRow[];
     summary: MonthSummary;
   }>;
-  togglePayment: (expenseChildId: string, paid: boolean) => Promise<void>;
+  togglePayment: (
+    expenseChildId: string,
+    paid: boolean,
+    details?: { paymentMethodId: string | null; bankAccountId: string | null },
+  ) => Promise<void>;
   getMonthSeries: (months?: number) => Promise<MonthSeriesPoint[]>;
   getTransactionSeries: () => Promise<TransactionSeriesResult>;
   createAsset: (input: AssetInput) => Promise<void>;
   updateAsset: (id: string, input: AssetInput) => Promise<void>;
+  moveAssetClassification: (id: string, classification: AssetClassification) => Promise<void>;
   deleteAsset: (id: string) => Promise<void>;
   listAssetChildren: (parentId: string) => Promise<Asset[]>;
   createAssetAporte: (parentId: string, input: AssetInput) => Promise<void>;
   getAssetSeries: () => Promise<AssetSeriesPoint[]>;
   getAssetById: (id: string) => Promise<Asset | null>;
+  listFlaggedExpenseTotals: () => Promise<{ yearMonth: string; total: number }[]>;
+  createPaymentMethod: (name: string) => Promise<void>;
+  updatePaymentMethod: (id: string, name: string) => Promise<void>;
+  deletePaymentMethod: (id: string) => Promise<void>;
+  createBankAccount: (name: string) => Promise<void>;
+  updateBankAccount: (id: string, name: string) => Promise<void>;
+  deleteBankAccount: (id: string) => Promise<void>;
+  createGoal: (input: GoalInput) => Promise<void>;
+  updateGoal: (id: string, input: GoalInput) => Promise<void>;
+  setGoalDone: (id: string, done: boolean) => Promise<void>;
+  deleteGoal: (id: string) => Promise<void>;
+  createLifestyleItem: (name: string, monthlyCost: number) => Promise<void>;
+  updateLifestyleItem: (id: string, name: string, monthlyCost: number) => Promise<void>;
+  deleteLifestyleItem: (id: string) => Promise<void>;
   exportBackup: () => Promise<void>;
   /** Importa backup JSON; retorna false se o usuário cancelar. */
   importBackup: () => Promise<boolean>;
@@ -85,39 +113,52 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [incomes, setIncomes] = useState<Income[]>([]);
   const [assets, setAssets] = useState<AssetWithBalance[]>([]);
+  const [paymentMethods, setPaymentMethods] = useState<PaymentMethod[]>([]);
+  const [bankAccounts, setBankAccounts] = useState<BankAccount[]>([]);
+  const [goals, setGoals] = useState<Goal[]>([]);
+  const [lifestyleItems, setLifestyleItems] = useState<LifestyleItem[]>([]);
 
   const refresh = useCallback(async () => {
-    const [g, e, i, a] = await Promise.all([
+    const [g, e, i, a, methods, accounts, goalRows, lifestyle] = await Promise.all([
       repo.listGroups(),
       repo.listExpenseTemplates(),
       repo.listIncomes(),
       repo.listAssets(),
+      catalog.listPaymentMethods(),
+      catalog.listBankAccounts(),
+      catalog.listGoals(),
+      catalog.listLifestyleItems(),
     ]);
     setGroups(g);
     setExpenses(e);
     setIncomes(i);
     setAssets(a);
+    setPaymentMethods(methods);
+    setBankAccounts(accounts);
+    setGoals(goalRows);
+    setLifestyleItems(lifestyle);
     setReady(true);
   }, []);
 
   useEffect(() => {
     (async () => {
       await seedIfEmpty();
+      await seedCatalogs();
       await refresh();
     })().catch(console.error);
   }, [refresh]);
 
   const createGroup = useCallback(
-    async (name: string, kind: GroupKind) => {
-      await repo.createGroup(name, kind);
+    async (name: string, kind: GroupKind, parentId: string | null = null) => {
+      await repo.createGroup(name, kind, parentId);
       await refresh();
     },
     [refresh]
   );
 
   const updateGroup = useCallback(
-    async (id: string, name: string, kind: GroupKind) => {
-      await repo.updateGroup(id, name, kind);
+    async (id: string, name: string, kind: GroupKind, parentId: string | null = null) => {
+      await repo.updateGroup(id, name, kind, parentId);
       await refresh();
     },
     [refresh]
@@ -148,10 +189,7 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
   );
 
   const updateExpenseChild = useCallback(
-    async (
-      id: string,
-      patch: { name: string; amount: number; dueDay: number; groupId: string | null }
-    ) => {
+    async (id: string, patch: ExpenseChildPatch) => {
       await repo.updateExpenseChild(id, patch);
       await refresh();
     },
@@ -272,9 +310,16 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [incomes]
   );
 
-  const togglePayment = useCallback(async (expenseChildId: string, paid: boolean) => {
-    await repo.setExpensePaid(expenseChildId, paid);
-  }, []);
+  const togglePayment = useCallback(
+    async (
+      expenseChildId: string,
+      paid: boolean,
+      details?: { paymentMethodId: string | null; bankAccountId: string | null },
+    ) => {
+      await repo.setExpensePaid(expenseChildId, paid, details);
+    },
+    [],
+  );
 
   const getMonthSeries = useCallback(async (_months = 12): Promise<MonthSeriesPoint[]> => {
     const current = currentYearMonth();
@@ -293,12 +338,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       const children = await repo.listExpenseChildren(yearMonth);
       const monthIncomes = filterActiveInMonth(allIncomes, yearMonth);
       const expenseTotal = sumAmounts(children);
+      const livingCostTotal = sumAmounts(children.filter((child) => child.includeInLivingCost));
       const expenseCount = children.length;
       points.push({
         yearMonth,
         label: yearMonthLabel(yearMonth),
         expenseTotal,
         incomeTotal: sumAmounts(monthIncomes),
+        livingCostTotal,
         expenseCount,
         expenseAvg: expenseCount > 0 ? expenseTotal / expenseCount : 0,
       });
@@ -330,6 +377,14 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
     [refresh]
   );
 
+  const moveAssetClassification = useCallback(
+    async (id: string, classification: AssetClassification) => {
+      await repo.moveAssetClassification(id, classification);
+      await refresh();
+    },
+    [refresh]
+  );
+
   const deleteAsset = useCallback(
     async (id: string) => {
       await repo.deleteAsset(id);
@@ -354,6 +409,103 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
 
   const getAssetById = useCallback(async (id: string) => repo.getAssetById(id), []);
 
+  const listFlaggedExpenseTotals = useCallback(
+    () => repo.listFlaggedExpenseTotals(),
+    []
+  );
+
+  const createPaymentMethod = useCallback(
+    async (name: string) => {
+      await catalog.createPaymentMethod(name);
+      await refresh();
+    },
+    [refresh]
+  );
+  const updatePaymentMethod = useCallback(
+    async (id: string, name: string) => {
+      await catalog.updatePaymentMethod(id, name);
+      await refresh();
+    },
+    [refresh]
+  );
+  const deletePaymentMethod = useCallback(
+    async (id: string) => {
+      await catalog.deletePaymentMethod(id);
+      await refresh();
+    },
+    [refresh]
+  );
+  const createBankAccount = useCallback(
+    async (name: string) => {
+      await catalog.createBankAccount(name);
+      await refresh();
+    },
+    [refresh]
+  );
+  const updateBankAccount = useCallback(
+    async (id: string, name: string) => {
+      await catalog.updateBankAccount(id, name);
+      await refresh();
+    },
+    [refresh]
+  );
+  const deleteBankAccount = useCallback(
+    async (id: string) => {
+      await catalog.deleteBankAccount(id);
+      await refresh();
+    },
+    [refresh]
+  );
+  const createGoal = useCallback(
+    async (input: GoalInput) => {
+      await catalog.createGoal(input);
+      await refresh();
+    },
+    [refresh]
+  );
+  const updateGoal = useCallback(
+    async (id: string, input: GoalInput) => {
+      await catalog.updateGoal(id, input);
+      await refresh();
+    },
+    [refresh]
+  );
+  const setGoalDone = useCallback(
+    async (id: string, done: boolean) => {
+      await catalog.setGoalDone(id, done);
+      await refresh();
+    },
+    [refresh]
+  );
+  const deleteGoal = useCallback(
+    async (id: string) => {
+      await catalog.deleteGoal(id);
+      await refresh();
+    },
+    [refresh]
+  );
+  const createLifestyleItem = useCallback(
+    async (name: string, monthlyCost: number) => {
+      await catalog.createLifestyleItem(name, monthlyCost);
+      await refresh();
+    },
+    [refresh]
+  );
+  const updateLifestyleItem = useCallback(
+    async (id: string, name: string, monthlyCost: number) => {
+      await catalog.updateLifestyleItem(id, name, monthlyCost);
+      await refresh();
+    },
+    [refresh]
+  );
+  const deleteLifestyleItem = useCallback(
+    async (id: string) => {
+      await catalog.deleteLifestyleItem(id);
+      await refresh();
+    },
+    [refresh]
+  );
+
   const handleExportBackup = useCallback(async () => {
     await exportBackup();
   }, []);
@@ -371,6 +523,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       expenses,
       incomes,
       assets,
+      paymentMethods,
+      bankAccounts,
+      goals,
+      lifestyleItems,
       refresh,
       createGroup,
       updateGroup,
@@ -394,11 +550,26 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       getTransactionSeries,
       createAsset,
       updateAsset,
+      moveAssetClassification,
       deleteAsset,
       listAssetChildren,
       createAssetAporte,
       getAssetSeries,
       getAssetById,
+      listFlaggedExpenseTotals,
+      createPaymentMethod,
+      updatePaymentMethod,
+      deletePaymentMethod,
+      createBankAccount,
+      updateBankAccount,
+      deleteBankAccount,
+      createGoal,
+      updateGoal,
+      setGoalDone,
+      deleteGoal,
+      createLifestyleItem,
+      updateLifestyleItem,
+      deleteLifestyleItem,
       exportBackup: handleExportBackup,
       importBackup: handleImportBackup,
     }),
@@ -408,6 +579,10 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       expenses,
       incomes,
       assets,
+      paymentMethods,
+      bankAccounts,
+      goals,
+      lifestyleItems,
       refresh,
       createGroup,
       updateGroup,
@@ -431,11 +606,26 @@ export function DataProvider({ children }: { children: React.ReactNode }) {
       getTransactionSeries,
       createAsset,
       updateAsset,
+      moveAssetClassification,
       deleteAsset,
       listAssetChildren,
       createAssetAporte,
       getAssetSeries,
       getAssetById,
+      listFlaggedExpenseTotals,
+      createPaymentMethod,
+      updatePaymentMethod,
+      deletePaymentMethod,
+      createBankAccount,
+      updateBankAccount,
+      deleteBankAccount,
+      createGoal,
+      updateGoal,
+      setGoalDone,
+      deleteGoal,
+      createLifestyleItem,
+      updateLifestyleItem,
+      deleteLifestyleItem,
       handleExportBackup,
       handleImportBackup,
     ]

@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS groups (
   id TEXT PRIMARY KEY NOT NULL,
   name TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'expense',
+  parent_id TEXT,
   created_at TEXT NOT NULL
 );
 
@@ -28,7 +29,10 @@ CREATE TABLE IF NOT EXISTS expenses (
   year_month TEXT,
   paid INTEGER NOT NULL DEFAULT 0,
   paid_at TEXT,
-  excluded INTEGER NOT NULL DEFAULT 0
+  excluded INTEGER NOT NULL DEFAULT 0,
+  payment_method_id TEXT,
+  bank_account_id TEXT,
+  include_in_living_cost INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS incomes (
@@ -40,6 +44,8 @@ CREATE TABLE IF NOT EXISTS incomes (
   start_date TEXT NOT NULL,
   end_date TEXT,
   group_id TEXT REFERENCES groups(id) ON DELETE SET NULL,
+  payment_method_id TEXT,
+  bank_account_id TEXT,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL
 );
@@ -69,6 +75,11 @@ CREATE TABLE IF NOT EXISTS assets (
   year_month TEXT,
   parent_id TEXT,
   active INTEGER NOT NULL DEFAULT 1,
+  classification TEXT NOT NULL DEFAULT 'good',
+  generates_income INTEGER NOT NULL DEFAULT 0,
+  installment REAL,
+  cet_annual REAL,
+  counts_as_debt INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 
@@ -81,6 +92,42 @@ CREATE TABLE IF NOT EXISTS asset_movements (
   date TEXT NOT NULL,
   year_month TEXT NOT NULL,
   created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS payment_methods (
+  id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS bank_accounts (
+  id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS goals (
+  id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  target_amount REAL NOT NULL DEFAULT 0,
+  deadline TEXT NOT NULL,
+  alignment INTEGER NOT NULL DEFAULT 3,
+  urgency INTEGER NOT NULL DEFAULT 3,
+  kind TEXT NOT NULL DEFAULT 'custom',
+  done INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lifestyle_items (
+  id TEXT PRIMARY KEY NOT NULL,
+  name TEXT NOT NULL,
+  monthly_cost REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY NOT NULL,
+  value TEXT NOT NULL
 );
 `;
 
@@ -206,6 +253,106 @@ async function migrate(db: SQLite.SQLiteDatabase): Promise<void> {
       );
     }
     await db.execAsync('DELETE FROM asset_movements');
+  }
+
+  await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS payment_methods (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS bank_accounts (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS goals (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      target_amount REAL NOT NULL DEFAULT 0,
+      deadline TEXT NOT NULL,
+      alignment INTEGER NOT NULL DEFAULT 3,
+      urgency INTEGER NOT NULL DEFAULT 3,
+      kind TEXT NOT NULL DEFAULT 'custom',
+      done INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS lifestyle_items (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      monthly_cost REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY NOT NULL,
+      value TEXT NOT NULL
+    );
+  `);
+
+  const groupColsLater = await tableColumns(db, 'groups');
+  if (!groupColsLater.has('parent_id')) {
+    await db.execAsync('ALTER TABLE groups ADD COLUMN parent_id TEXT');
+  }
+
+  const expenseColsNow = await tableColumns(db, 'expenses');
+  if (!expenseColsNow.has('payment_method_id')) {
+    await db.execAsync('ALTER TABLE expenses ADD COLUMN payment_method_id TEXT');
+  }
+  if (!expenseColsNow.has('bank_account_id')) {
+    await db.execAsync('ALTER TABLE expenses ADD COLUMN bank_account_id TEXT');
+  }
+  if (!expenseColsNow.has('include_in_living_cost')) {
+    await db.execAsync(
+      'ALTER TABLE expenses ADD COLUMN include_in_living_cost INTEGER NOT NULL DEFAULT 0'
+    );
+  }
+
+  const incomeCols = await tableColumns(db, 'incomes');
+  if (!incomeCols.has('payment_method_id')) {
+    await db.execAsync('ALTER TABLE incomes ADD COLUMN payment_method_id TEXT');
+  }
+  if (!incomeCols.has('bank_account_id')) {
+    await db.execAsync('ALTER TABLE incomes ADD COLUMN bank_account_id TEXT');
+  }
+
+  const assetColsNow = await tableColumns(db, 'assets');
+  if (!assetColsNow.has('classification')) {
+    await db.execAsync(
+      `ALTER TABLE assets ADD COLUMN classification TEXT NOT NULL DEFAULT 'good'`
+    );
+  }
+  if (!assetColsNow.has('generates_income')) {
+    await db.execAsync('ALTER TABLE assets ADD COLUMN generates_income INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!assetColsNow.has('installment')) {
+    await db.execAsync('ALTER TABLE assets ADD COLUMN installment REAL');
+  }
+  if (!assetColsNow.has('cet_annual')) {
+    await db.execAsync('ALTER TABLE assets ADD COLUMN cet_annual REAL');
+  }
+  if (!assetColsNow.has('counts_as_debt')) {
+    await db.execAsync('ALTER TABLE assets ADD COLUMN counts_as_debt INTEGER NOT NULL DEFAULT 0');
+  }
+
+  const backfill = await db.getFirstAsync<{ value: string }>(
+    `SELECT value FROM settings WHERE key = 'living_cost_backfill'`
+  );
+  if (!backfill) {
+    const recurring = await db.getAllAsync<{ id: string }>(
+      `SELECT id FROM expenses WHERE recurrence IN ('monthly', 'semiannual')`
+    );
+    if (recurring.length > 0) {
+      const ids = recurring.map((row) => row.id);
+      const marks = ids.map(() => '?').join(', ');
+      await db.runAsync(
+        `UPDATE expenses SET include_in_living_cost = 1
+         WHERE id IN (${marks}) OR parent_id IN (${marks})`,
+        [...ids, ...ids]
+      );
+    }
+    await db.runAsync(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES ('living_cost_backfill', '1')`
+    );
   }
 }
 

@@ -70,4 +70,6 @@ export const Spacing = {
 } as const;
 
 export const BottomTabInset = Platform.select({ ios: 50, android: 80 }) ?? 0;
+/** Space above the safe area reserved for the floating bottom menu. */
+export const BottomMenuClearance = 120;
 export const MaxContentWidth = 800;

@@ -4,10 +4,12 @@ import * as Sharing from 'expo-sharing';
 
 import type { BackupPayload } from '@/data/types';
 import * as repo from '@/db/repository';
+import { __ } from '@/i18n/translate';
+import { reloadLocale } from '@/i18n';
 
 function backupFilename(): string {
   const stamp = new Date().toISOString().slice(0, 10);
-  return `expense-track-bkp-${stamp}.json`;
+  return `value-tools-bkp-${stamp}.json`;
 }
 
 async function downloadOnWeb(json: string, filename: string): Promise<void> {
@@ -62,12 +64,12 @@ export async function exportBackup(): Promise<void> {
 
   const available = await Sharing.isAvailableAsync();
   if (!available) {
-    throw new Error('Compartilhamento não disponível neste dispositivo');
+    throw new Error(__('error.share'));
   }
 
   await Sharing.shareAsync(file.uri, {
     mimeType: 'application/json',
-    dialogTitle: 'Exportar backup',
+    dialogTitle: __('backup.share_title'),
     UTI: 'public.json',
   });
 }
@@ -95,9 +97,10 @@ export async function importBackup(): Promise<boolean> {
   try {
     parsed = JSON.parse(text) as BackupPayload;
   } catch {
-    throw new Error('O arquivo selecionado não é um JSON válido');
+    throw new Error(__('error.backup_json'));
   }
 
   await repo.importBackupData(parsed);
+  await reloadLocale();
   return true;
 }

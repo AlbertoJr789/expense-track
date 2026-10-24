@@ -1,19 +1,5 @@
 import type { Recurrence, RecurringItem } from '@/data/types';
-
-const MONTH_LABELS = [
-  'Jan',
-  'Fev',
-  'Mar',
-  'Abr',
-  'Mai',
-  'Jun',
-  'Jul',
-  'Ago',
-  'Set',
-  'Out',
-  'Nov',
-  'Dez',
-];
+import { __ } from '@/i18n/translate';
 
 export function createId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -32,7 +18,11 @@ export function parseYearMonth(yearMonth: string): { year: number; month: number
 
 export function yearMonthLabel(yearMonth: string): string {
   const { year, month } = parseYearMonth(yearMonth);
-  return `${MONTH_LABELS[month - 1]}/${String(year).slice(2)}`;
+  return `${__(`month.${month}`)}/${String(year).slice(2)}`;
+}
+
+export function defaultIncludeInLivingCost(recurrence: Recurrence): boolean {
+  return recurrence === 'monthly' || recurrence === 'semiannual';
 }
 
 export function monthBounds(yearMonth: string): { start: string; end: string } {
@@ -119,9 +109,9 @@ export function formatBrl(value: number): string {
 }
 
 export function recurrenceLabel(recurrence: Recurrence): string {
-  if (recurrence === 'monthly') return 'Mensal';
-  if (recurrence === 'semiannual') return 'Semestral';
-  return 'Sem recorrência';
+  if (recurrence === 'monthly') return __('recurrence.monthly');
+  if (recurrence === 'semiannual') return __('recurrence.semiannual');
+  return __('recurrence.none');
 }
 
 export function currentYearMonth(): string {
