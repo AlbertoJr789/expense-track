@@ -1,8 +1,9 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { RevealItem } from '@/components/reveal-item';
 import { Screen } from '@/components/screen';
 import { SkeletonList } from '@/components/skeleton';
 import { ThemedText } from '@/components/themed-text';
@@ -22,6 +23,8 @@ export default function LifestyleScreen() {
   const [flagged, setFlagged] = useState<{ yearMonth: string; total: number }[]>([]);
   const [series, setSeries] = useState<MonthSeriesPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [play, setPlay] = useState(0);
+  const populated = useRef(false);
 
   const load = useCallback(() => {
     if (!ready) return;
@@ -32,7 +35,11 @@ export default function LifestyleScreen() {
         setSeries(points);
       })
       .catch(console.error)
-      .finally(() => setLoading(false));
+      .finally(() => {
+        setLoading(false);
+        if (populated.current) setPlay((current) => current + 1);
+        populated.current = true;
+      });
   }, [ready, listFlaggedExpenseTotals, getMonthSeries]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -45,32 +52,35 @@ export default function LifestyleScreen() {
   });
   const ratio = snapshot.gapRatio == null ? '—' : `${Math.round(snapshot.gapRatio * 100)}%`;
 
-  if (!ready || loading) {
-    return <Screen title={__('nav.lifestyle')}><SkeletonList /></Screen>;
-  }
+  const showSkeleton = !ready || (loading && !populated.current);
 
   return (
     <Screen title={__('nav.lifestyle')}>
+      {showSkeleton ? <SkeletonList /> : (
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + BottomMenuClearance }]}>
         <ThemedText type="smallBold">{__('life.part1')}</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">{__('life.list')}</ThemedText>
         {lifestyleItems.length === 0 ? (
           <ThemedText themeColor="textSecondary">{__('life.empty_maintenance')}</ThemedText>
         ) : (
-          lifestyleItems.map((item) => (
-            <View key={item.id} style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
-              <ThemedText style={{ flex: 1 }}>{item.name}</ThemedText>
-              <ThemedText>{formatBrl(item.monthlyCost)}</ThemedText>
-            </View>
+          lifestyleItems.map((item, index) => (
+            <RevealItem key={item.id} index={index} play={play}>
+              <View style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
+                <ThemedText style={{ flex: 1 }}>{item.name}</ThemedText>
+                <ThemedText>{formatBrl(item.monthlyCost)}</ThemedText>
+              </View>
+            </RevealItem>
           ))
         )}
-        <Card label={__('life.living')} value={formatBrl(snapshot.livingCost)} hint={__('life.living_hint')} />
-        <Card label={__('life.ideal')} value={formatBrl(snapshot.idealMonthly)} hint={__('life.ideal_hint')} accent />
+        <Card play={play} index={lifestyleItems.length} label={__('life.living')} value={formatBrl(snapshot.livingCost)} hint={__('life.living_hint')} />
+        <Card play={play} index={lifestyleItems.length + 1} label={__('life.ideal')} value={formatBrl(snapshot.idealMonthly)} hint={__('life.ideal_hint')} accent />
 
         <ThemedText type="smallBold" style={styles.section}>{__('life.part2')}</ThemedText>
-        <Card label={__('life.income_goal')} value={formatBrl(snapshot.incomeGoal)} accent />
-        <Card label={__('life.actual_income')} value={formatBrl(snapshot.actualIncome)} />
+        <Card play={play} index={lifestyleItems.length + 2} label={__('life.income_goal')} value={formatBrl(snapshot.incomeGoal)} accent />
+        <Card play={play} index={lifestyleItems.length + 3} label={__('life.actual_income')} value={formatBrl(snapshot.actualIncome)} />
         <Card
+          play={play}
+          index={lifestyleItems.length + 4}
           label={__('life.gap')}
           value={formatBrl(snapshot.gap)}
           hint={
@@ -82,22 +92,41 @@ export default function LifestyleScreen() {
         />
 
         <ThemedText type="smallBold" style={styles.section}>{__('life.part3')}</ThemedText>
-        <Card label={__('life.moderate')} value={formatBrl(snapshot.moderatePatrimony)} accent />
-        <Card label={__('life.conservative')} value={formatBrl(snapshot.conservativePatrimony)} />
+        <Card play={play} index={lifestyleItems.length + 5} label={__('life.moderate')} value={formatBrl(snapshot.moderatePatrimony)} accent />
+        <Card play={play} index={lifestyleItems.length + 6} label={__('life.conservative')} value={formatBrl(snapshot.conservativePatrimony)} />
       </ScrollView>
+      )}
     </Screen>
   );
 }
 
-function Card({ label, value, hint, extra, accent }: { label: string; value: string; hint?: string; extra?: string; accent?: boolean }) {
+function Card({
+  index,
+  play,
+  label,
+  value,
+  hint,
+  extra,
+  accent,
+}: {
+  index: number;
+  play: number;
+  label: string;
+  value: string;
+  hint?: string;
+  extra?: string;
+  accent?: boolean;
+}) {
   const theme = useTheme();
   return (
-    <View style={[styles.card, { backgroundColor: accent ? theme.backgroundSelected : theme.backgroundElement }]}>
-      <ThemedText type="small" themeColor="textSecondary">{label}</ThemedText>
-      <ThemedText style={[styles.value, { color: accent ? theme.accent : theme.text }]}>{value}</ThemedText>
-      {hint ? <ThemedText type="small" themeColor="textSecondary">{hint}</ThemedText> : null}
-      {extra ? <ThemedText type="smallBold">{extra}</ThemedText> : null}
-    </View>
+    <RevealItem index={index} play={play}>
+      <View style={[styles.card, { backgroundColor: accent ? theme.backgroundSelected : theme.backgroundElement }]}>
+        <ThemedText type="small" themeColor="textSecondary">{label}</ThemedText>
+        <ThemedText style={[styles.value, { color: accent ? theme.accent : theme.text }]}>{value}</ThemedText>
+        {hint ? <ThemedText type="small" themeColor="textSecondary">{hint}</ThemedText> : null}
+        {extra ? <ThemedText type="smallBold">{extra}</ThemedText> : null}
+      </View>
+    </RevealItem>
   );
 }
 

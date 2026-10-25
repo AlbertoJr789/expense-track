@@ -9,11 +9,13 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import Animated, { Easing, interpolate, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { useFocusEffect } from 'expo-router';
 
 import { ItemFormModal } from '@/components/item-form-modal';
+import { RevealItem } from '@/components/reveal-item';
 import { SkeletonList } from '@/components/skeleton';
 import { SwipeRow } from '@/components/swipe-row';
 import { ThemedText } from '@/components/themed-text';
@@ -150,20 +152,103 @@ function StatusBadge({ paid, onPress }: { paid: boolean; onPress: () => void }) 
   );
 }
 
+function TotalsSummary({
+  collapsed,
+  onToggle,
+  title,
+  totalLabel,
+  totalCaption,
+  rows,
+  grandTotal,
+  amountColor,
+  backgroundColor,
+}: {
+  collapsed: boolean;
+  onToggle: () => void;
+  title: string;
+  totalLabel: string;
+  totalCaption: string;
+  rows: { id: string; name: string; total: number }[];
+  grandTotal: string;
+  amountColor: string;
+  backgroundColor: string;
+}) {
+  const theme = useTheme();
+  const measured = useSharedValue(0);
+  const progress = useSharedValue(collapsed ? 0 : 1);
+  const ready = useRef(false);
+
+  useEffect(() => {
+    if (!ready.current) return;
+    progress.value = withTiming(collapsed ? 0 : 1, {
+      duration: 280,
+      easing: Easing.out(Easing.cubic),
+    });
+  }, [collapsed, progress]);
+
+  const clipStyle = useAnimatedStyle(() => ({
+    height: measured.value * progress.value,
+    opacity: interpolate(progress.value, [0, 0.35, 1], [0, 1, 1]),
+  }));
+  const chevronStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${interpolate(progress.value, [0, 1], [180, 0])}deg` }],
+  }));
+  const openLabelStyle = useAnimatedStyle(() => ({ opacity: progress.value }));
+  const closedLabelStyle = useAnimatedStyle(() => ({ opacity: 1 - progress.value }));
+
+  return (
+    <View style={[styles.totalsFooter, { backgroundColor }]}>
+      <Pressable onPress={onToggle} style={styles.totalsHeader} hitSlop={6}>
+        <View style={styles.totalsLabels}>
+          <Animated.View style={openLabelStyle}>
+            <ThemedText type="smallBold">{title}</ThemedText>
+          </Animated.View>
+          <Animated.View style={[styles.totalsClosedLabel, closedLabelStyle]}>
+            <ThemedText type="smallBold">{totalLabel}</ThemedText>
+          </Animated.View>
+        </View>
+        <Animated.View style={chevronStyle}>
+          <Ionicons name="chevron-down" size={18} color={theme.textSecondary} />
+        </Animated.View>
+      </Pressable>
+      <Animated.View style={[styles.totalsClip, clipStyle]} pointerEvents={collapsed ? 'none' : 'auto'}>
+        <View
+          style={styles.totalsMeasure}
+          onLayout={(event) => {
+            measured.value = event.nativeEvent.layout.height;
+            if (!ready.current) {
+              ready.current = true;
+              progress.value = collapsed ? 0 : 1;
+            }
+          }}>
+          {rows.map((row) => (
+            <View key={row.id} style={styles.totalRow}>
+              <ThemedText type="small" themeColor="textSecondary">{row.name}</ThemedText>
+              <ThemedText type="small" style={{ color: amountColor }}>{formatBrl(row.total)}</ThemedText>
+            </View>
+          ))}
+          <View style={[styles.totalRow, styles.totalRowGrand]}>
+            <ThemedText type="smallBold">{totalCaption}</ThemedText>
+            <ThemedText type="smallBold" style={{ color: amountColor }}>{grandTotal}</ThemedText>
+          </View>
+        </View>
+      </Animated.View>
+    </View>
+  );
+}
+
 function UndoSnackbar({
   visible,
   onUndo,
-  bottom,
 }: {
   visible: boolean;
   onUndo: () => void;
-  bottom: number;
 }) {
   const theme = useTheme();
   const { __ } = useI18n();
   if (!visible) return null;
   return (
-    <View style={[styles.snackbar, { bottom, backgroundColor: theme.backgroundSelected }]}>
+    <View style={[styles.snackbar, { backgroundColor: theme.backgroundSelected }]}>
       <ThemedText type="small">{__('common.deleted')}</ThemedText>
       <Pressable onPress={onUndo} hitSlop={8}>
         <ThemedText type="smallBold" style={{ color: theme.accent }}>
@@ -211,8 +296,11 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
 
   const [month, setMonth] = useState(currentYearMonth());
   const [query, setQuery] = useState('');
+  const [appliedQuery, setAppliedQuery] = useState('');
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [appliedGroupIds, setAppliedGroupIds] = useState<string[]>([]);
   const [showExcluded, setShowExcluded] = useState(false);
+  const [appliedExcluded, setAppliedExcluded] = useState(false);
   const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [rows, setRows] = useState<(MonthExpenseRow | MonthIncomeRow)[]>([]);
   const [excludedRows, setExcludedRows] = useState<Expense[]>([]);
@@ -224,25 +312,57 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
   const [editingChild, setEditingChild] = useState<Expense | null>(null);
   const [totalsCollapsed, setTotalsCollapsed] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [listLoading, setListLoading] = useState(false);
+  const [play, setPlay] = useState(0);
   const [listEpoch, setListEpoch] = useState(0);
   const focusedOnce = useRef(false);
+  const populated = useRef(false);
+  const refreshGen = useRef(0);
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const replay = useCallback(() => {
+    if (populated.current) setPlay((current) => current + 1);
+    populated.current = true;
+  }, []);
+
+  const queueRefresh = useCallback((apply: () => void) => {
+    const gen = ++refreshGen.current;
+    requestAnimationFrame(() => {
+      if (refreshGen.current !== gen) return;
+      setListLoading(true);
+      setTimeout(() => {
+        if (refreshGen.current !== gen) return;
+        apply();
+        setVisibleCount(PAGE_SIZE);
+        setListLoading(false);
+        setPlay((current) => current + 1);
+      }, 160);
+    });
+  }, []);
 
   const load = useCallback(async () => {
+    const gen = ++refreshGen.current;
     setLoading(true);
+    setListLoading(true);
     try {
       const data = await getMonthDashboard(month);
-    if (isExpense) {
-      setRows(data.expenses);
-      const excluded = await listExcludedExpenseChildren(month);
-      setExcludedRows(excluded);
-    } else {
-      setRows(data.incomes);
-      setExcludedRows([]);
+      if (refreshGen.current !== gen) return;
+      if (isExpense) {
+        setRows(data.expenses);
+        const excluded = await listExcludedExpenseChildren(month);
+        if (refreshGen.current !== gen) return;
+        setExcludedRows(excluded);
+      } else {
+        setRows(data.incomes);
+        setExcludedRows([]);
+      }
+    } finally {
+      if (refreshGen.current !== gen) return;
+      setLoading(false);
+      setListLoading(false);
+      replay();
     }
-  } finally {
-    setLoading(false);
-  }
-  }, [getMonthDashboard, listExcludedExpenseChildren, month, isExpense]);
+  }, [getMonthDashboard, listExcludedExpenseChildren, month, isExpense, replay]);
 
   useFocusEffect(
     useCallback(() => {
@@ -276,7 +396,7 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
   }, [createRef, openCreate]);
 
   const sourceRows = useMemo(() => {
-    if (isExpense && showExcluded) {
+    if (isExpense && appliedExcluded) {
       return excludedRows.map(
         (e) =>
           ({
@@ -289,19 +409,19 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
       );
     }
     return rows;
-  }, [isExpense, showExcluded, excludedRows, rows, groups]);
+  }, [isExpense, appliedExcluded, excludedRows, rows, groups]);
 
   const visibleRows = useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = appliedQuery.trim().toLowerCase();
     let list = sourceRows;
     if (q) list = list.filter((r) => r.name.toLowerCase().includes(q));
-    if (selectedGroupIds.length > 0) {
-      const set = new Set(selectedGroupIds);
+    if (appliedGroupIds.length > 0) {
+      const set = new Set(appliedGroupIds);
       list = list.filter((r) => r.groupId != null && set.has(r.groupId));
     }
     if (pending) list = list.filter((r) => r.id !== pending.id);
     return list;
-  }, [sourceRows, query, selectedGroupIds, pending]);
+  }, [sourceRows, appliedQuery, appliedGroupIds, pending]);
 
   const paged = useMemo(() => visibleRows.slice(0, visibleCount), [visibleRows, visibleCount]);
 
@@ -327,19 +447,32 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
   function changeMonth(next: string) {
     setMonth(next);
     setVisibleCount(PAGE_SIZE);
+    setListLoading(true);
   }
 
   function changeQuery(text: string) {
     setQuery(text);
-    setVisibleCount(PAGE_SIZE);
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => queueRefresh(() => setAppliedQuery(text)), 200);
   }
 
   function toggleGroupFilter(groupId: string) {
-    setSelectedGroupIds((prev) => {
-      if (prev.includes(groupId)) return prev.filter((id) => id !== groupId);
-      return [...prev, groupId];
-    });
-    setVisibleCount(PAGE_SIZE);
+    const next = selectedGroupIds.includes(groupId)
+      ? selectedGroupIds.filter((id) => id !== groupId)
+      : [...selectedGroupIds, groupId];
+    setSelectedGroupIds(next);
+    queueRefresh(() => setAppliedGroupIds(next));
+  }
+
+  function clearGroupFilter() {
+    setSelectedGroupIds([]);
+    queueRefresh(() => setAppliedGroupIds([]));
+  }
+
+  function toggleExcluded() {
+    const next = !showExcluded;
+    setShowExcluded(next);
+    queueRefresh(() => setAppliedExcluded(next));
   }
 
   async function openEdit(item: RecurringItem) {
@@ -456,7 +589,7 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
 
   const footerBottom = insets.bottom + BottomMenuClearance;
   const showGenerate =
-    isExpense && !showExcluded && rows.length === 0 && !query.trim() && selectedGroupIds.length === 0;
+    isExpense && !appliedExcluded && rows.length === 0 && !appliedQuery.trim() && appliedGroupIds.length === 0;
 
   if (loading && rows.length === 0) {
     return (
@@ -481,10 +614,7 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
         {isExpense && (
           <View style={styles.excludedRow}>
             <Pressable
-              onPress={() => {
-                setShowExcluded((v) => !v);
-                setVisibleCount(PAGE_SIZE);
-              }}
+              onPress={toggleExcluded}
               style={[
                 styles.groupChip,
                 {
@@ -550,7 +680,7 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
               })}
               {selectedGroupIds.length > 0 && (
                 <Pressable
-                  onPress={() => setSelectedGroupIds([])}
+                  onPress={clearGroupFilter}
                   hitSlop={8}
                   style={styles.groupChipClear}>
                   <ThemedText type="small" themeColor="textSecondary">
@@ -563,8 +693,11 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
         )}
       </View>
 
+      {listLoading ? (
+        <SkeletonList />
+      ) : (
       <FlatList
-        key={listEpoch}
+        key={`${listEpoch}-${play}`}
         style={styles.fill}
         data={paged}
         keyExtractor={(item) => item.id}
@@ -579,9 +712,9 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
         ListEmptyComponent={
           <View style={styles.emptyBlock}>
             <ThemedText themeColor="textSecondary" style={styles.empty}>
-              {query.trim() || selectedGroupIds.length > 0
+              {appliedQuery.trim() || appliedGroupIds.length > 0
                 ? __('common.empty_filters')
-                : showExcluded
+                : appliedExcluded
                   ? __('entry.empty_excluded', { month: yearMonthLabel(month) })
                   : __('entry.empty_active', { noun, month: yearMonthLabel(month) })}
             </ThemedText>
@@ -604,10 +737,11 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
             )}
           </View>
         }
-        renderItem={({ item }) => {
+        renderItem={({ item, index }) => {
           const expenseRow = isExpense ? (item as MonthExpenseRow) : null;
-          if (showExcluded && expenseRow) {
+          if (appliedExcluded && expenseRow) {
             return (
+              <RevealItem index={index} play={play}>
               <View style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
                 <View style={styles.rowPress}>
                   <View style={styles.rowMain}>
@@ -626,9 +760,11 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
                   <Ionicons name="arrow-undo-outline" size={18} color="#fff" />
                 </Pressable>
               </View>
+              </RevealItem>
             );
           }
           return (
+            <RevealItem index={index} play={play}>
             <SwipeRow onDelete={() => remove(item)}>
               <View style={[styles.row, { backgroundColor: theme.backgroundElement }]}>
                 <Pressable onPress={() => openEdit(item)} style={styles.rowPress}>
@@ -657,57 +793,30 @@ function ItemsSection({ kind, createRef }: { kind: 'expense' | 'income'; createR
                 </Pressable>
               </View>
             </SwipeRow>
+            </RevealItem>
           );
         }}
       />
+      )}
 
-      {visibleRows.length > 0 && !showExcluded && (
-        <View
-          style={[
-            styles.totalsFooter,
-            { bottom: footerBottom, backgroundColor: theme.backgroundSelected },
-          ]}>
-          <Pressable
-            onPress={() => setTotalsCollapsed((v) => !v)}
-            style={styles.totalsHeader}
-            hitSlop={6}>
-            <ThemedText type="smallBold">
-              {totalsCollapsed ? __('entry.total_line', { value: formatBrl(grandTotal) }) : __('entry.sums')}
-            </ThemedText>
-            <Ionicons
-              name={totalsCollapsed ? 'chevron-up' : 'chevron-down'}
-              size={18}
-              color={theme.textSecondary}
+      {(pending || (!listLoading && visibleRows.length > 0 && !appliedExcluded)) && (
+        <View pointerEvents="box-none" style={[styles.totalsDock, { bottom: footerBottom }]}>
+          <UndoSnackbar visible={!!pending} onUndo={undo} />
+          {!listLoading && visibleRows.length > 0 && !appliedExcluded && (
+            <TotalsSummary
+              collapsed={totalsCollapsed}
+              onToggle={() => setTotalsCollapsed((current) => !current)}
+              title={__('entry.sums')}
+              totalLabel={__('entry.total_line', { value: formatBrl(grandTotal) })}
+              totalCaption={__('common.total')}
+              rows={groupTotals}
+              grandTotal={formatBrl(grandTotal)}
+              amountColor={amountColor}
+              backgroundColor={theme.backgroundSelected}
             />
-          </Pressable>
-          {!totalsCollapsed && (
-            <>
-              {groupTotals.map((g) => (
-                <View key={g.id} style={styles.totalRow}>
-                  <ThemedText type="small" themeColor="textSecondary">
-                    {g.name}
-                  </ThemedText>
-                  <ThemedText type="small" style={{ color: amountColor }}>
-                    {formatBrl(g.total)}
-                  </ThemedText>
-                </View>
-              ))}
-              <View style={[styles.totalRow, styles.totalRowGrand]}>
-                <ThemedText type="smallBold">{__('common.total')}</ThemedText>
-                <ThemedText type="smallBold" style={{ color: amountColor }}>
-                  {formatBrl(grandTotal)}
-                </ThemedText>
-              </View>
-            </>
           )}
         </View>
       )}
-
-      <UndoSnackbar
-        visible={!!pending}
-        onUndo={undo}
-        bottom={footerBottom + (visibleRows.length > 0 && !showExcluded ? (totalsCollapsed ? 52 : 88) : 0)}
-      />
 
       <ItemFormModal
         visible={modalOpen}
@@ -888,12 +997,15 @@ const styles = StyleSheet.create({
     paddingVertical: Spacing.one,
   },
   groupChipSelectedText: { color: '#fff', fontWeight: '600' },
-  totalsFooter: {
+  totalsDock: {
     position: 'absolute',
     left: Spacing.three,
     right: Spacing.three,
     maxWidth: MaxContentWidth,
     alignSelf: 'center',
+    gap: Spacing.two,
+  },
+  totalsFooter: {
     borderRadius: Spacing.three,
     paddingHorizontal: Spacing.three,
     paddingVertical: Spacing.two,
@@ -903,7 +1015,12 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
+    gap: Spacing.two,
   },
+  totalsLabels: { flex: 1, minHeight: 20, justifyContent: 'center' },
+  totalsClosedLabel: { position: 'absolute', left: 0, right: 0 },
+  totalsClip: { overflow: 'hidden' },
+  totalsMeasure: { position: 'absolute', left: 0, right: 0, gap: Spacing.one },
   totalRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -927,11 +1044,6 @@ const styles = StyleSheet.create({
   detailBack: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
   detailActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   snackbar: {
-    position: 'absolute',
-    left: Spacing.four,
-    right: Spacing.four,
-    maxWidth: MaxContentWidth,
-    alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',

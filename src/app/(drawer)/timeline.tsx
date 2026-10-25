@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CartesianLineChart, SERIES_COLORS } from '@/components/cartesian-line-chart';
 import { MultiSelect } from '@/components/multi-select';
+import { RevealItem } from '@/components/reveal-item';
 import { Screen } from '@/components/screen';
 import { SkeletonList } from '@/components/skeleton';
 import { ThemedText } from '@/components/themed-text';
@@ -28,6 +29,8 @@ export default function TimelineScreen() {
   const [selectedTxIds, setSelectedTxIds] = useState<string[]>([]);
   const [viewMode, setViewMode] = useState<'transaction' | 'group'>('transaction');
   const [loading, setLoading] = useState(true);
+  const [play, setPlay] = useState(0);
+  const populated = useRef(false);
 
   const load = useCallback(() => {
     if (!ready) return;
@@ -38,7 +41,11 @@ export default function TimelineScreen() {
         setTxData(transactions);
       })
       .catch(console.error)
-      .finally(() => setLoading(false));
+      .finally(() => {
+        setLoading(false);
+        if (populated.current) setPlay((current) => current + 1);
+        populated.current = true;
+      });
   }, [ready, getMonthSeries, getTransactionSeries]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -114,7 +121,10 @@ export default function TimelineScreen() {
             {(['flow', 'average'] as const).map((value) => (
               <Pressable
                 key={value}
-                onPress={() => setTab(value)}
+                onPress={() => {
+                  setTab(value);
+                  setPlay((current) => current + 1);
+                }}
                 style={[styles.segmentItem, tab === value && { backgroundColor: theme.background }]}>
                 <ThemedText type={tab === value ? 'smallBold' : 'small'}>
                   {value === 'flow' ? __('timeline.flow') : __('timeline.average')}
@@ -126,6 +136,7 @@ export default function TimelineScreen() {
           {tab === 'flow' ? (
             <>
               <ThemedText themeColor="textSecondary">{__('timeline.flow_hint')}</ThemedText>
+              <RevealItem index={0} play={play}>
               <View style={[styles.card, { backgroundColor: theme.backgroundElement }]}>
                 <ThemedText type="smallBold">{__('timeline.reserve')}</ThemedText>
                 <ThemedText style={[styles.value, { color: theme.accent }]}>
@@ -135,6 +146,7 @@ export default function TimelineScreen() {
                   {__('timeline.reserve_hint', { value: formatBrl(livingCost) })}
                 </ThemedText>
               </View>
+              </RevealItem>
               {currentPoint && previousPoint && (
                 <ThemedText style={{ color: expenseDelta <= 0 ? theme.income : theme.expense }}>
                   {__('timeline.vs_previous', {
@@ -156,8 +168,9 @@ export default function TimelineScreen() {
                   ))}
                 </View>
               </ScrollView>
-              {series.slice().reverse().map((point) => (
-                <View key={point.yearMonth} style={[styles.monthRow, { backgroundColor: theme.backgroundElement }]}>
+              {series.slice().reverse().map((point, index) => (
+                <RevealItem key={point.yearMonth} index={index + 1} play={play}>
+                <View style={[styles.monthRow, { backgroundColor: theme.backgroundElement }]}>
                   <ThemedText type="smallBold">{point.label}</ThemedText>
                   <View style={{ alignItems: 'flex-end' }}>
                     <ThemedText type="small" style={{ color: theme.expense }}>{formatBrl(point.expenseTotal)}</ThemedText>
@@ -169,6 +182,7 @@ export default function TimelineScreen() {
                     </ThemedText>
                   </View>
                 </View>
+                </RevealItem>
               ))}
             </>
           ) : (
@@ -178,15 +192,18 @@ export default function TimelineScreen() {
                 label={__('timeline.transactions')}
                 options={(txData?.series ?? []).map((item) => ({ value: item.id, label: item.name, groupId: item.groupId }))}
                 values={selectedTxIds}
-                onChange={setSelectedTxIds}
+                onChange={(ids) => {
+                  setSelectedTxIds(ids);
+                  setPlay((current) => current + 1);
+                }}
                 placeholder={__('timeline.pick')}
                 groups={groups.filter((group) => group.kind === 'expense').map((group) => ({ id: group.id, name: group.name }))}
               />
               <View style={[styles.segment, { backgroundColor: theme.backgroundElement }]}>
-                <Pressable onPress={() => setViewMode('transaction')} style={[styles.segmentItem, viewMode === 'transaction' && { backgroundColor: theme.background }]}>
+                <Pressable onPress={() => { setViewMode('transaction'); setPlay((current) => current + 1); }} style={[styles.segmentItem, viewMode === 'transaction' && { backgroundColor: theme.background }]}>
                   <ThemedText type="small">{__('timeline.by_tx')}</ThemedText>
                 </Pressable>
-                <Pressable onPress={() => setViewMode('group')} style={[styles.segmentItem, viewMode === 'group' && { backgroundColor: theme.background }]}>
+                <Pressable onPress={() => { setViewMode('group'); setPlay((current) => current + 1); }} style={[styles.segmentItem, viewMode === 'group' && { backgroundColor: theme.background }]}>
                   <ThemedText type="small">{__('timeline.by_category')}</ThemedText>
                 </Pressable>
               </View>
@@ -194,8 +211,9 @@ export default function TimelineScreen() {
               {chartSeries.length === 0 ? (
                 <ThemedText themeColor="textSecondary">{__('timeline.none_selected')}</ThemedText>
               ) : (
-                chartSeries.map((item) => (
-                  <View key={item.id} style={[styles.monthRow, { backgroundColor: theme.backgroundElement }]}>
+                chartSeries.map((item, index) => (
+                  <RevealItem key={item.id} index={index} play={play}>
+                  <View style={[styles.monthRow, { backgroundColor: theme.backgroundElement }]}>
                     <View style={{ flex: 1 }}>
                       <ThemedText type="smallBold">{item.name}</ThemedText>
                       <ThemedText type="small" themeColor="textSecondary">
@@ -204,6 +222,7 @@ export default function TimelineScreen() {
                     </View>
                     <ThemedText type="smallBold" style={{ color: colorById[item.id] }}>{formatBrl(item.average)}</ThemedText>
                   </View>
+                  </RevealItem>
                 ))
               )}
             </>

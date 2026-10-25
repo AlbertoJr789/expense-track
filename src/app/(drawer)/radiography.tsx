@@ -1,9 +1,10 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, View } from 'react-native';
 import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { CartesianLineChart } from '@/components/cartesian-line-chart';
+import { RevealItem } from '@/components/reveal-item';
 import { Screen } from '@/components/screen';
 import { SkeletonList } from '@/components/skeleton';
 import { ThemedText } from '@/components/themed-text';
@@ -24,6 +25,8 @@ export default function RadiographyScreen() {
   const [series, setSeries] = useState<MonthSeriesPoint[]>([]);
   const [assetSeries, setAssetSeries] = useState<AssetSeriesPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [play, setPlay] = useState(0);
+  const populated = useRef(false);
 
   const load = useCallback(() => {
     if (!ready) return;
@@ -34,7 +37,11 @@ export default function RadiographyScreen() {
         setAssetSeries(assetsPoints);
       })
       .catch(console.error)
-      .finally(() => setLoading(false));
+      .finally(() => {
+        setLoading(false);
+        if (populated.current) setPlay((current) => current + 1);
+        populated.current = true;
+      });
   }, [ready, getMonthSeries, getAssetSeries]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
@@ -53,63 +60,71 @@ export default function RadiographyScreen() {
       }]
     : [];
 
-  if (!ready || loading) {
-    return <Screen title={__('nav.radiography')}><SkeletonList /></Screen>;
-  }
+  const showSkeleton = !ready || (loading && !populated.current);
 
   return (
     <Screen title={__('nav.radiography')}>
+      {showSkeleton ? <SkeletonList /> : (
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + BottomMenuClearance }]}>
         <ThemedText themeColor="textSecondary">{__('radio.intro')}</ThemedText>
         {snapshot.totalAssets === 0 && snapshot.liabilities === 0 ? (
           <ThemedText themeColor="textSecondary">{__('radio.fill')}</ThemedText>
         ) : (
           <>
-            <Metric label={__('radio.net')} value={formatBrl(snapshot.netWorth)} color={snapshot.netWorth >= 0 ? theme.income : theme.expense} />
-            <Metric label={__('balance.short_term')} value={formatBrl(snapshot.shortTerm)} />
-            <Metric label={__('balance.long_term')} value={formatBrl(snapshot.longTerm)} />
-            <Metric label={__('balance.good')} value={formatBrl(snapshot.goods)} />
-            <Metric label={__('balance.you_owe')} value={formatBrl(snapshot.liabilities)} />
-            <Metric label={__('radio.availability')} value={percent(snapshot.availability)} hint={__('radio.availability_hint')} />
-            <Metric label={__('radio.immobilization')} value={percent(snapshot.immobilization)} hint={__('radio.immobilization_hint')} />
+            <Metric play={play} index={0} label={__('radio.net')} value={formatBrl(snapshot.netWorth)} color={snapshot.netWorth >= 0 ? theme.income : theme.expense} />
+            <Metric play={play} index={1} label={__('balance.short_term')} value={formatBrl(snapshot.shortTerm)} />
+            <Metric play={play} index={2} label={__('balance.long_term')} value={formatBrl(snapshot.longTerm)} />
+            <Metric play={play} index={3} label={__('balance.good')} value={formatBrl(snapshot.goods)} />
+            <Metric play={play} index={4} label={__('balance.you_owe')} value={formatBrl(snapshot.liabilities)} />
+            <Metric play={play} index={5} label={__('radio.availability')} value={percent(snapshot.availability)} hint={__('radio.availability_hint')} />
+            <Metric play={play} index={6} label={__('radio.immobilization')} value={percent(snapshot.immobilization)} hint={__('radio.immobilization_hint')} />
             <ThemedText type="smallBold" style={styles.section}>{__('radio.composition')}</ThemedText>
-            <Bar left={snapshot.longTerm} right={snapshot.goods} leftLabel={__('radio.investments')} rightLabel={__('radio.goods')} />
-            <Metric label={__('radio.earns')} value={formatBrl(snapshot.incomeGenerating)} hint={__('radio.earns_hint', { value: formatBrl(snapshot.incomeGenerating) })} />
+            <RevealItem index={7} play={play}>
+              <Bar left={snapshot.longTerm} right={snapshot.goods} leftLabel={__('radio.investments')} rightLabel={__('radio.goods')} />
+            </RevealItem>
+            <Metric play={play} index={8} label={__('radio.earns')} value={formatBrl(snapshot.incomeGenerating)} hint={__('radio.earns_hint', { value: formatBrl(snapshot.incomeGenerating) })} />
           </>
         )}
 
         <ThemedText type="smallBold" style={styles.section}>{__('radio.debt_title')}</ThemedText>
         <ThemedText type="small" themeColor="textSecondary">{__('radio.debt_hint')}</ThemedText>
-        <Metric label={__('radio.debt_total')} value={formatBrl(snapshot.contractedDebt)} />
-        <Metric label={__('radio.cet')} value={snapshot.weightedCet == null ? '—' : `${snapshot.weightedCet.toFixed(2)}%`} />
-        <Metric label={__('radio.installments')} value={formatBrl(snapshot.installments)} />
+        <Metric play={play} index={9} label={__('radio.debt_total')} value={formatBrl(snapshot.contractedDebt)} />
+        <Metric play={play} index={10} label={__('radio.cet')} value={snapshot.weightedCet == null ? '—' : `${snapshot.weightedCet.toFixed(2)}%`} />
+        <Metric play={play} index={11} label={__('radio.installments')} value={formatBrl(snapshot.installments)} />
         <Metric
+          play={play}
+          index={12}
           label={__('radio.commitment')}
           value={commitment == null ? '—' : percent(commitment)}
           hint={commitment == null ? __('radio.no_income') : __('radio.threshold')}
           color={commitment != null && commitment > 0.3 ? theme.expense : theme.income}
         />
-        {snapshot.payoffs.map((debt) => (
-          <View key={debt.id} style={[styles.card, { backgroundColor: theme.backgroundElement }]}>
+        {snapshot.payoffs.map((debt, index) => (
+          <RevealItem key={debt.id} index={13 + index} play={play}>
+          <View style={[styles.card, { backgroundColor: theme.backgroundElement }]}>
             <ThemedText type="smallBold">{debt.name}</ThemedText>
             <ThemedText type="small" themeColor="textSecondary">
               {__('radio.payoff')}: {debt.months == null ? __('radio.payoff_never') : __('radio.payoff_months', { count: debt.months })}
             </ThemedText>
           </View>
+          </RevealItem>
         ))}
 
         <ThemedText type="smallBold" style={styles.section}>{__('radio.series')}</ThemedText>
         {assetChart.length === 0 ? (
           <ThemedText themeColor="textSecondary">{__('radio.series_empty')}</ThemedText>
         ) : (
+          <RevealItem index={13 + snapshot.payoffs.length} play={play}>
           <CartesianLineChart
             months={assetSeries.map((point) => ({ yearMonth: point.yearMonth, label: point.label }))}
             series={assetChart}
             colorById={{ patrimonio: theme.income }}
             height={220}
           />
+          </RevealItem>
         )}
       </ScrollView>
+      )}
     </Screen>
   );
 }
@@ -119,14 +134,30 @@ function percent(value: number | null): string {
   return `${Math.round(value * 100)}%`;
 }
 
-function Metric({ label, value, hint, color }: { label: string; value: string; hint?: string; color?: string }) {
+function Metric({
+  index,
+  play,
+  label,
+  value,
+  hint,
+  color,
+}: {
+  index: number;
+  play: number;
+  label: string;
+  value: string;
+  hint?: string;
+  color?: string;
+}) {
   const theme = useTheme();
   return (
-    <View style={[styles.card, { backgroundColor: theme.backgroundElement }]}>
-      <ThemedText type="small" themeColor="textSecondary">{label}</ThemedText>
-      <ThemedText style={[styles.value, color ? { color } : null]}>{value}</ThemedText>
-      {hint ? <ThemedText type="small" themeColor="textSecondary">{hint}</ThemedText> : null}
-    </View>
+    <RevealItem index={index} play={play}>
+      <View style={[styles.card, { backgroundColor: theme.backgroundElement }]}>
+        <ThemedText type="small" themeColor="textSecondary">{label}</ThemedText>
+        <ThemedText style={[styles.value, color ? { color } : null]}>{value}</ThemedText>
+        {hint ? <ThemedText type="small" themeColor="textSecondary">{hint}</ThemedText> : null}
+      </View>
+    </RevealItem>
   );
 }
 
